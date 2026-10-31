@@ -85,7 +85,14 @@ describe('requestNarrative (llm.stream)', () => {
     expect(message).toContain('文档输出上限')
   })
 
-  it('reports a model that simply skipped a section as a different failure', async () => {
+  /*
+   * An adapter can report the provider's natural stop even when its own
+   * `maxTokens` cut the text. That is what a live handoff hit: `finish` with
+   * `kind === 'stop'`, §4 missing, and a message blaming the model instead of
+   * the budget. The next action is the same either way, so the wording must
+   * point at the setting.
+   */
+  it('treats a natural stop that cut a section short as a budget problem', async () => {
     const llm = {
       stream: () =>
         chunks([
@@ -93,9 +100,14 @@ describe('requestNarrative (llm.stream)', () => {
           { type: 'finish', reason: { kind: 'stop' } },
         ]),
     }
-    await expect(
-      requestNarrative(llm as never, 'p', 16_000, { provider: 'a', model: 'b' }),
-    ).rejects.toThrow('模型没有写完必需小节')
+    const error = await requestNarrative(llm as never, 'p', 16_000, {
+      provider: 'a',
+      model: 'b',
+    }).catch((caught: Error) => caught)
+    const message = (error as Error).message
+    expect(message).toContain('输出预算不够')
+    expect(message).toContain('文档输出上限')
+    expect(message).not.toContain('模型没有写完必需小节')
   })
 
   /*
@@ -139,13 +151,16 @@ describe('requestNarrative (llm.stream)', () => {
   it('still reports an empty response as a plain failure, not a cut-off', async () => {
     const llm = { stream: () => chunks([]) }
     /*
-     * Guarded by `text.length > 0`, so an empty stream falls through to the
-     * caller, which refuses the document. Reporting "budget exhausted" for a
-     * response that produced nothing would blame the wrong setting.
+     * Nothing produced at all is a different fault from running out of room:
+     * blaming the output budget here would send the user to the wrong setting.
      */
-    await expect(
-      requestNarrative(llm as never, 'p', 20_000, { provider: 'a', model: 'b' }),
-    ).resolves.toBeDefined()
+    const error = await requestNarrative(llm as never, 'p', 20_000, {
+      provider: 'a',
+      model: 'b',
+    }).catch((caught: Error) => caught)
+    const message = (error as Error).message
+    expect(message).toContain('没有返回任何内容')
+    expect(message).not.toContain('输出预算不够')
   })
 
   it('accepts a complete response without complaint', async () => {

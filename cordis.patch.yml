@@ -21,7 +21,7 @@
         contextRearmDeltaPercent: 10
         rearmDeltaTokens: 200000
         maxAutoActionsPerSession: 3
-        summaryMaxTokens: 20000
+        summaryMaxTokens: 26000
         stepWaitTimeoutMs: 900000
         actionDeadlineMs: 1800000
         openNewSessionOnHandoff: true

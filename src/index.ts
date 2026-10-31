@@ -1280,14 +1280,12 @@ export async function requestNarrative(
    * finish reason out lets the caller say what actually happened.
    */
   let truncated = false
-  let finishSeen = false
   for await (const chunk of chunks) {
     if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
       text += chunk.text
       continue
     }
     if (chunk.type === 'finish') {
-      finishSeen = true
       const reason = (chunk as { reason?: { kind?: string; failure?: { message?: string } } }).reason
       if (reason?.kind === 'length' || reason?.kind === 'max_tokens') truncated = true
       if (reason?.kind === 'error' || reason?.kind === 'aborted') {
@@ -1326,25 +1324,35 @@ export async function requestNarrative(
    * which setting to raise, not that section 4 could not be found.
    */
   const missing = missingRequired(narrative)
-  if (missing.length > 0 && (truncated || text.length > 0)) {
+  if (missing.length > 0) {
     const names = missing
       .map((key) => DOC_SECTIONS.find((section) => section.key === key)?.heading.replace(/^##\s*/, '') ?? key)
       .join('、')
     /*
-     * No `finish` chunk, but output stopped short of a required section: that
-     * is the budget running out, and the message must say so. Telling the user
-     * "the model did not finish §4" sends them looking for a parser bug.
+     * Output that stops short of a required section is a budget problem, whether
+     * or not the stream said so.
+     *
+     * Three ways a real truncation has arrived here:
+     *   1. `finish` with `kind === 'length'` — the documented shape;
+     *   2. no `finish` chunk at all — a normal end that ran out of room;
+     *   3. `finish` with `kind === 'stop'` — an adapter reporting the provider's
+     *      natural stop even though its own `maxTokens` cut the text.
+     *
+     * Only case 3 kept the misleading wording, and it is the one that happened:
+     * the message blamed the model for not finishing §4 while the setting was
+     * genuinely too small. Distinguishing them buys nothing — the user's next
+     * action is identical in all three, and the alternative is a message that
+     * sends them hunting for a parser bug that does not exist.
      */
-    const exhausted = truncated || !finishSeen
-    if (exhausted) {
-      const chars = text.length
+    const produced = text.length
+    if (produced > 0) {
       throw new Error(
-        `模型输出在写到 ${chars} 字符时停止，必需小节没写完（缺：${names}）。`
+        `模型输出在写到 ${produced} 字符时停止，必需小节没写完（缺：${names}）。`
         + `这通常是输出预算不够：请把设置里的「文档输出上限」从 ${maxTokens} 调大`
-        + `（例如 ${Math.ceil((maxTokens * 2) / 1000) * 1000}），或把「交接文档上限（字符）」调小，然后 /handoff retry。`
+        + `（例如 ${Math.ceil((maxTokens * 1.5) / 1000) * 1000}），或把「交接文档上限（字符）」调小，然后 /handoff retry。`,
       )
     }
-    throw new Error(`模型没有写完必需小节（缺：${names}）。已放弃本次交接，可 /handoff retry。`)
+    throw new Error(`模型没有返回任何内容（缺：${names}）。已放弃本次交接，可 /handoff retry。`)
   }
 
   return narrative

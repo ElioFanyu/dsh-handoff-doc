@@ -97,8 +97,20 @@ describe('the output budget and the document budget must agree', () => {
   })
 
   it('stays quiet when the two budgets agree', () => {
-    // 24000 characters needs ~18000 tokens; 20000 clears it.
-    const warnings = localWarnings(settings({ summaryMaxTokens: 20_000, handoffDocMaxChars: 24_000 }))
+    /*
+     * Chinese costs about one token per character, so 24000 characters needs
+     * ~24000 tokens. This pair used to be considered safe under a 0.75 estimate
+     * — and it is exactly the pair that failed a live handoff inside §4, which
+     * is why the ratio is now 1.
+     */
+    const warnings = localWarnings(settings({ summaryMaxTokens: 24_000, handoffDocMaxChars: 24_000 }))
     expect(warnings.join(' ')).not.toContain('可能不足以写完')
+  })
+
+  it('warns for the pair that used to look safe under an English estimate', () => {
+    const warnings = localWarnings(settings({ summaryMaxTokens: 20_000, handoffDocMaxChars: 24_000 }))
+    expect(warnings.join(' ')).toContain('可能不足以写完')
+    // Names the size actually needed, not a 0.75-scaled one.
+    expect(warnings.join(' ')).toContain('约需 24000')
   })
 })

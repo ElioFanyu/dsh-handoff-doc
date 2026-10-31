@@ -92,7 +92,7 @@ export const DEFAULT_SETTINGS: HandoffSettings = {
   contextRearmDeltaPercent: 10,
   rearmDeltaTokens: 200_000,
   maxAutoActionsPerSession: 3,
-  summaryMaxTokens: 20_000,
+  summaryMaxTokens: 26_000,
   stepWaitTimeoutMs: 900_000,
   actionDeadlineMs: 1_800_000,
   openNewSessionOnHandoff: true,
@@ -146,13 +146,20 @@ export function localWarnings(settings: HandoffSettings): readonly string[] {
    * the model is cut off before the last sections exist and the handoff fails
    * with "missing required section" — which names the symptom, not the cause.
    *
-   * The conversion is deliberately pessimistic (0.75 tokens per character) so
-   * the warning fires before the failure does.
+   * The conversion assumes CJK-heavy prose — one token per character, not the
+   * 0.75 an English estimate would give. Under-estimating silently lets a
+   * document that cannot fit sail past the warning and fail mid-§4 with
+   * "missing required section", which names the symptom instead of the cause.
+   *
+   * Kept identical to `TOKENS_PER_CHAR` in `settings.ts`: the two halves warn
+   * about the same thing, and a drifting constant would make the card and the
+   * host disagree about whether a configuration is safe.
    */
-  if (settings.summaryMaxTokens < Math.ceil(settings.handoffDocMaxChars * 0.75)) {
+  const needed = Math.ceil(settings.handoffDocMaxChars * 1)
+  if (settings.summaryMaxTokens < needed) {
     warnings.push(
       `输出上限 ${settings.summaryMaxTokens} tokens 可能不足以写完 ${settings.handoffDocMaxChars} 字符的文档`
-        + `（约需 ${Math.ceil(settings.handoffDocMaxChars * 0.75)}）。模型会在后面的小节被截断，交接会因「缺少必需小节」失败。`,
+        + `（约需 ${needed}）。模型会在后面的小节被截断，交接会因「缺少必需小节」失败。`,
     )
   }
   if (settings.handoffDocMaxChars > 60_000) {

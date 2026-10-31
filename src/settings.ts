@@ -131,7 +131,7 @@ export const Config: Schema<Config> = Schema.object({
   contextRearmDeltaPercent: Schema.number().min(0).max(50).step(1).default(10),
   rearmDeltaTokens: Schema.number().min(0).step(1).default(200_000),
   maxAutoActionsPerSession: Schema.number().min(1).max(10).step(1).default(3),
-  summaryMaxTokens: Schema.number().min(256).step(1).default(20_000),
+  summaryMaxTokens: Schema.number().min(256).step(1).default(26_000),
   stepWaitTimeoutMs: Schema.number().min(1000).step(1).default(900_000),
   actionDeadlineMs: Schema.number().min(1000).step(1).default(1_800_000),
   openNewSessionOnHandoff: Schema.boolean().default(true),
@@ -278,7 +278,18 @@ export function validateSettings(config: Config): {
    * The conversion is deliberately pessimistic (1 Chinese character ≈ 1 token,
    * ASCII ≈ 0.3) so the warning fires before the failure does.
    */
-  const neededOutputTokens = Math.ceil(config.handoffDocMaxChars * 0.75)
+  /*
+   * Chinese costs a token per character; 0.75 was an English assumption.
+   *
+   * This document is written in Chinese, where one character is roughly one
+   * token (a CJK glyph is not split into word pieces the way Latin text is).
+   * Estimating 0.75 per character under-counts by a quarter, so a 24000-character
+   * budget was reported as needing 18000 tokens when it really needs ~24000: the
+   * warning stayed silent, the model ran out inside §4, and the handoff failed
+   * for "missing required section" — the exact failure this warning exists to
+   * prevent.
+   */
+  const neededOutputTokens = Math.ceil(config.handoffDocMaxChars * TOKENS_PER_CHAR)
   if (config.summaryMaxTokens < neededOutputTokens) {
     warnings.push({
       field: 'summaryMaxTokens',
@@ -291,6 +302,15 @@ export function validateSettings(config: Config): {
 
   return { blocking: undefined, warnings }
 }
+
+/**
+ * Tokens per character for the output estimate, one source of truth.
+ *
+ * 1.0 assumes CJK-heavy prose, which is what this document is. Being pessimistic
+ * is the point: over-estimating produces an unnecessary warning, under-estimating
+ * produces a failed handoff that the user cannot diagnose from the message.
+ */
+export const TOKENS_PER_CHAR = 1
 
 /** True when the configured mode keys automatic handoff on context occupancy. */
 export function triggerUsesContext(mode: Config['autoHandoffTrigger']): boolean {
