@@ -79,7 +79,7 @@ describe('requestNarrative (llm.stream)', () => {
 
     expect(error).toBeInstanceOf(Error)
     const message = (error as Error).message
-    expect(message).toContain('4096 token 上限截断')
+    expect(message).toContain('4096')
     expect(message).toContain('4. 下一步 + 验证映射')
     // It must name the setting to raise, not just the symptom.
     expect(message).toContain('文档输出上限')
@@ -96,6 +96,56 @@ describe('requestNarrative (llm.stream)', () => {
     await expect(
       requestNarrative(llm as never, 'p', 16_000, { provider: 'a', model: 'b' }),
     ).rejects.toThrow('模型没有写完必需小节')
+  })
+
+  /*
+   * The real host does not send the chunk the test above pretends exists.
+   *
+   * On this build `llm.stream` yields a `finish` chunk only for `error` and
+   * `aborted`; a normal end — including one cut off by `maxTokens` — just stops
+   * iterating. So the first live handoff after the scope work hit exactly this
+   * shape: plenty of text, no `finish`, no §4, and the user was told "the model
+   * did not finish the required section", pointing at a parser bug instead of
+   * at the output budget.
+   */
+  it('treats a stream that ends without a finish chunk as a budget cut-off', async () => {
+    const llm = {
+      stream: () =>
+        chunks([
+          {
+            type: 'text-delta',
+            text:
+              '## 0. 30 秒自检\n无补充\n## 1. 目标与验收\n做插件\n'
+              + '## 2. 当前有效事实\n事实\n## 3. 卡点与阻塞\n无\n## 4. 下一步',
+          },
+        ]),
+    }
+    const error = await requestNarrative(llm as never, 'p', 20_000, {
+      provider: 'a',
+      model: 'b',
+    }).catch((caught: Error) => caught)
+
+    expect(error).toBeInstanceOf(Error)
+    const message = (error as Error).message
+    // Names what actually went wrong, and the setting that fixes it.
+    expect(message).toContain('输出预算不够')
+    expect(message).toContain('文档输出上限')
+    expect(message).toContain('4. 下一步')
+    expect(message).toContain('/handoff retry')
+    // The misleading wording must be gone.
+    expect(message).not.toContain('模型没有写完必需小节')
+  })
+
+  it('still reports an empty response as a plain failure, not a cut-off', async () => {
+    const llm = { stream: () => chunks([]) }
+    /*
+     * Guarded by `text.length > 0`, so an empty stream falls through to the
+     * caller, which refuses the document. Reporting "budget exhausted" for a
+     * response that produced nothing would blame the wrong setting.
+     */
+    await expect(
+      requestNarrative(llm as never, 'p', 20_000, { provider: 'a', model: 'b' }),
+    ).resolves.toBeDefined()
   })
 
   it('accepts a complete response without complaint', async () => {

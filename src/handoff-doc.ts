@@ -406,12 +406,33 @@ export function buildDocPrompt(input: {
     '   - §8 的「已验证」只写**继任者仍然需要依赖**的证据（例如「改了 X 必须跑 Y」）；',
     '   - 上一段会话跑过的测试、看过的输出，属于过程，写进 CHANGELOG.md 而不是这里。',
     '   - 判断标准：继任者接手后再读一遍，这条信息还能改变他的动作吗？不能就删。',
+    /*
+     * The rule above, plus "先写必需小节", is exactly the combination that made
+     * a live handoff fail: told to drop completed material, the model also
+     * dropped §4 and returned a document that was refused for a missing section.
+     * The two rules are not in conflict — deleting §1's ticked items and omitting
+     * §4 entirely are different acts — but a model under space pressure will
+     * conflate them unless the boundary is drawn explicitly.
+     */
+    '   - **本条只删内容，不删小节。** 十个标题一个都不能少；§4「下一步」永远要写，',
+    '     哪怕只是「当前没有待办，接手先跑 §0」。删掉整节会被校验器拒绝，交接直接失败。',
     '4. **不写行号。** 行号第二天就过期。写职责，不写位置。',
     '5. **不编造验证结果。** 只有你真的执行过、并看到输出的，才能写进 §8 的「已验证」；否则写进「未验证」并给出验证方法。',
     '6. **不要用「未知」糊弄。** 对话记录里有线索就必须写出具体内容；只有记录里确实没有时，才写「未知」并说明缺什么。',
     '7. **不写密钥、令牌、密码、连接串的值。** 需要引用时只写键名。',
     '8. **§0 必须能直接照做。** 写命令和预期输出，不写「建议先检查一下环境」。',
     '9. **总长控制在约 ' + Math.round(input.budgetChars / 1000) + ' 千字符以内。** 超了会被程序截断，截断发生在你最需要保留的段落上。',
+    /*
+     * The human's aside often asks for something the document rules forbid
+     * ("record everything we did in detail"). The aside outranks §4 of the
+     * *pointer*, not the document's own contract, so the prompt has to resolve
+     * the collision rather than let the model guess: keep the required sections,
+     * drop the process. Stated here because the instruction never reaches this
+     * prompt — it only travels on the pointer.
+     */
+    '   - 若某条要求会让文档变长（例如「详细记录所有操作」），**必需小节优先**：',
+    '     先保证十个标题齐全、§0/§1/§2/§4/§6/§8 各有一句可执行内容，再用剩余篇幅写细节。',
+    '     写不完的细节，宁可概括成「详见 CHANGELOG」，也不要牺牲小节完整性。',
     /*
      * Order of operations, stated as a rule rather than a suggestion.
      *

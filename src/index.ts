@@ -1094,12 +1094,14 @@ export async function requestNarrative(
    * finish reason out lets the caller say what actually happened.
    */
   let truncated = false
+  let finishSeen = false
   for await (const chunk of chunks) {
     if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
       text += chunk.text
       continue
     }
     if (chunk.type === 'finish') {
+      finishSeen = true
       const reason = (chunk as { reason?: { kind?: string; failure?: { message?: string } } }).reason
       if (reason?.kind === 'length' || reason?.kind === 'max_tokens') truncated = true
       if (reason?.kind === 'error' || reason?.kind === 'aborted') {
@@ -1113,6 +1115,21 @@ export async function requestNarrative(
   }
   if (failure !== undefined) throw new Error(`模型调用失败：${failure}`)
 
+  /*
+   * A missing required section means the output budget ran out, even when no
+   * `finish` chunk says so.
+   *
+   * This build's `llm.stream` yields a `finish` chunk only for `error` and
+   * `aborted` — a normal end, including one cut off by `maxTokens`, just ends
+   * the iteration. So the `kind === 'length'` check above can never fire here,
+   * and a real truncation used to surface as "the model did not finish §4",
+   * pointing the reader at a parsing bug instead of at the setting to raise.
+   *
+   * The document is written in a fixed order with the required sections first,
+   * so "a required section is missing at the end" is the observable signature
+   * of running out of room. Treat it as truncation whenever output was actually
+   * produced; an empty response stays a plain failure.
+   */
   const narrative = parseDoc(text)
   /*
    * A truncated response is reported as truncation, with the budget named.
@@ -1127,10 +1144,18 @@ export async function requestNarrative(
     const names = missing
       .map((key) => DOC_SECTIONS.find((section) => section.key === key)?.heading.replace(/^##\s*/, '') ?? key)
       .join('、')
-    if (truncated) {
+    /*
+     * No `finish` chunk, but output stopped short of a required section: that
+     * is the budget running out, and the message must say so. Telling the user
+     * "the model did not finish §4" sends them looking for a parser bug.
+     */
+    const exhausted = truncated || !finishSeen
+    if (exhausted) {
+      const chars = text.length
       throw new Error(
-        `模型输出被 ${maxTokens} token 上限截断，后面的小节没写完（缺：${names}）。`
-        + `请把设置里的「文档输出上限」调到 ${Math.ceil((maxTokens * 2) / 1000) * 1000} 以上，或把「交接文档上限（字符）」调小，然后 /handoff retry。`
+        `模型输出在写到 ${chars} 字符时停止，必需小节没写完（缺：${names}）。`
+        + `这通常是输出预算不够：请把设置里的「文档输出上限」从 ${maxTokens} 调大`
+        + `（例如 ${Math.ceil((maxTokens * 2) / 1000) * 1000}），或把「交接文档上限（字符）」调小，然后 /handoff retry。`
       )
     }
     throw new Error(`模型没有写完必需小节（缺：${names}）。已放弃本次交接，可 /handoff retry。`)

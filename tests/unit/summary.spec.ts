@@ -220,6 +220,28 @@ describe('buildDocPrompt', () => {
     expect(prompt).toContain('整份交接会被拒绝')
   })
 
+  /*
+   * "Delete completed material" and "always write §4" are different
+   * instructions, and a live handoff failed because the model read the first as
+   * licence to drop the second. The boundary has to be drawn in the prompt.
+   */
+  it('says that dropping completed content must not drop a whole section', () => {
+    const prompt = buildDocPrompt({ facts: facts(), transcript: '记录', budgetChars: 24_000 })
+    expect(prompt).toContain('已完成的内容一律不写')
+    expect(prompt).toContain('本条只删内容，不删小节')
+    expect(prompt).toContain('§4「下一步」永远要写')
+  })
+
+  it('resolves a request for more detail in favour of section completeness', () => {
+    /*
+     * An aside like 「详细记录所有操作」 never reaches this prompt — it travels
+     * on the pointer — so the collision has to be settled here in advance.
+     */
+    const prompt = buildDocPrompt({ facts: facts(), transcript: '记录', budgetChars: 24_000 })
+    expect(prompt).toContain('必需小节优先')
+    expect(prompt).toContain('写不完的细节，宁可概括成')
+  })
+
   it('shows the commands found on disk so the model does not invent them', () => {
     const prompt = buildDocPrompt({ facts: facts(), transcript: '记录', budgetChars: 24_000 })
     expect(prompt).toContain('`npm run check`（来自 package.json#scripts.check）')
