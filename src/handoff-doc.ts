@@ -43,6 +43,7 @@
  * missing required sections is rejected before any session is created.
  */
 import { redactWithReport } from './redaction.ts'
+import { scopesInPlay, type WorkScope } from './work-scope.ts'
 
 /** One section of the document: a stable key, the heading, and what goes in it. */
 export interface DocSection {
@@ -200,6 +201,13 @@ export interface DocFacts {
   /** Verification commands found on disk, most specific first. */
   readonly commands: readonly ProjectCommand[]
   readonly stack: readonly string[]
+  /**
+   * Sub-projects the session worked in, most-worked first.
+   *
+   * Empty for a single-project workspace (the root manifest case), where there
+   * is nothing to rank and every command is equally in scope.
+   */
+  readonly scope?: readonly WorkScope[]
   readonly agentPreset: string | undefined
   readonly provider: string | undefined
   readonly model: string | undefined
@@ -688,13 +696,59 @@ export function renderDocument(input: {
 /** The program-read part of §0: what to run, and what "good" looks like. */
 export function selfCheckLines(facts: DocFacts): readonly string[] {
   const lines: string[] = []
+  /*
+   * Which commands are actually this session's.
+   *
+   * §0 exists to tell the successor what to run before touching anything, so a
+   * command for a project this session never opened is not a self-check — it is
+   * work invented for the successor. When the scope is known, the untouched
+   * projects lose their slots to the ones that were worked in, and are then
+   * reported once as untouched rather than dropped: a change that spans two
+   * projects must still mention both.
+   */
+  const scope = facts.scope ?? []
+  const focus = scope.find((entry) => entry.focus)
+  const focusPrefix = focus === undefined ? undefined : `cd ${focus.directory} && `
+  const inPlay = scopesInPlay(scope)
+  const inPlayPrefixes = inPlay.map((entry) => `cd ${entry.directory} && `)
+
   const primary = facts.commands.filter((entry) => isVerification(entry.command))
-  if (primary.length === 0) {
+  /*
+   * Three tiers, and the order is the message: the project this session worked
+   * in, then any other it worked in comparably hard, then — only when there is
+   * room left in §0's budget — the rest. A project observed twice by a `grep`
+   * is not a self-check, and spending a command slot on it is the defect this
+   * ranking exists to fix.
+   */
+  const inScope =
+    focusPrefix === undefined
+      ? primary
+      : [
+          ...primary.filter((entry) => entry.command.startsWith(focusPrefix)),
+          ...primary.filter(
+            (entry) =>
+              !entry.command.startsWith(focusPrefix) &&
+              inPlayPrefixes.some((prefix) => entry.command.startsWith(prefix)),
+          ),
+          ...primary.filter(
+            (entry) =>
+              !inPlayPrefixes.some((prefix) => entry.command.startsWith(prefix)),
+          ),
+        ]
+
+  if (inScope.length === 0) {
     lines.push(
       '- 命令：项目里尚未发现可识别的验证命令 → 接手第一件事是建立一条（哪怕是 `npm test`）。',
     )
   } else {
-    for (const entry of primary.slice(0, 3)) {
+    /*
+     * Cut the list at the point where the remaining commands belong to projects
+     * the session merely glanced at. Room is left for them only when nothing in
+     * scope exists, which cannot happen here — the flat single-project case has
+     * no prefixes at all and keeps its three slots.
+     */
+    const room = focusPrefix === undefined ? 3 : inPlay.length
+    for (const entry of inScope.slice(0, room)) {
       lines.push(`- 命令：\`${entry.command}\` — 预期：${entry.proves}`)
       // The definition on its own line, so the expectation reads as a sentence
       // and the evidence stays available without being crammed into it.
@@ -702,6 +756,24 @@ export function selfCheckLines(facts: DocFacts): readonly string[] {
         lines.push(`  - 实际执行：\`${entry.definition}\`（来自 ${entry.origin}）`)
       }
     }
+  }
+
+  /*
+   * The projects this session did not touch, in one line.
+   *
+   * Named with the count of tool calls that reached them, because "0 calls" is
+   * the fact that justifies skipping them — and because a successor that
+   * inherits an unrelated failure needs to know these were never exercised.
+   */
+  const untouched = scope.filter(
+    (entry) => !entry.focus && !inPlay.some((play) => play.directory === entry.directory),
+  )
+  if (focus !== undefined && untouched.length > 0) {
+    lines.push(
+      `- 本次未涉及：${untouched
+        .map((entry) => `\`${entry.directory}\`（${entry.calls}/${entry.totalCalls} 次工具调用）`)
+        .join('、')} —— 它们各自的 check 不在本次交接范围内`,
+    )
   }
   lines.push(
     `- 环境：${facts.stack.length === 0 ? '未识别技术栈' : facts.stack.join(' / ')}${
@@ -807,6 +879,8 @@ export function verificationMatrix(facts: DocFacts): readonly string[] {
     }
     return [...lines, ...trailingRules(facts)]
   }
+  const focus = facts.scope?.find((entry) => entry.focus)
+  const inPlay = new Set(scopesInPlay(facts.scope ?? []).map((entry) => entry.directory))
   const groups = new Map<string, ProjectCommand[]>()
   for (const entry of facts.commands) {
     const scope = scopeOf(entry) ?? '（工作区根）'
@@ -814,9 +888,37 @@ export function verificationMatrix(facts: DocFacts): readonly string[] {
     if (bucket === undefined) groups.set(scope, [entry])
     else bucket.push(entry)
   }
+  /*
+   * Put the session's own project first, and the ones it merely glanced at last.
+   *
+   * The matrix answers "I changed X, what must I run?" — so the project the
+   * session worked in is the only heading a successor usually needs. The others
+   * keep their commands (a change that spans two projects must still verify
+   * both) but stop occupying the top of the list, and the trailing rule says
+   * plainly which were never exercised.
+   */
+  const ordered = [...groups.entries()].sort((a, b) => {
+    if (focus === undefined) return 0
+    const rank = (scope: string): number =>
+      scope === focus.directory ? 0 : inPlay.has(scope) ? 1 : 2
+    return rank(a[0]) - rank(b[0])
+  })
   const lines: string[] = ['- 改动范围 → 必跑：']
-  for (const [scope, entries] of groups) {
-    lines.push(`  - **${scope}**`)
+  for (const [scope, entries] of ordered) {
+    /*
+     * The annotation only means something when there is a focus to contrast
+     * with. Without one the log named no project, and "本次未涉及" on every
+     * heading would claim a distinction the session never made.
+     */
+    const note =
+      focus === undefined
+        ? ''
+        : scope === focus.directory
+          ? '（本次工作范围）'
+          : inPlay.has(scope)
+            ? ''
+            : '（本次未涉及）'
+    lines.push(`  - **${scope}**${note}`)
     for (const entry of entries) {
       lines.push(`    - \`${entry.command}\` → ${entry.proves}`)
     }

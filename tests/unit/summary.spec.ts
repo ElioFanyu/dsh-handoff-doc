@@ -326,6 +326,125 @@ describe('renderDocument', () => {
     expect(text).toContain('`cd a && npm run check` → 全部检查通过')
   })
 
+  /*
+   * The document is for this session's successor, not for every project that
+   * happens to sit beside it. When the log says which one was worked in, §0
+   * must lead with that project's command and say plainly that the others were
+   * not part of this handoff.
+   */
+  it('leads §0 with the project the session worked in', () => {
+    const { text } = renderDocument({
+      facts: facts({
+        commands: [
+          { command: 'cd b && npm run check', origin: 'b/package.json#scripts.check', proves: '全部检查通过' },
+          { command: 'cd a && npm run check', origin: 'a/package.json#scripts.check', proves: '全部检查通过' },
+        ],
+        scope: [
+          { directory: 'a', calls: 9, totalCalls: 12, focus: true },
+          { directory: 'b', calls: 1, totalCalls: 12, focus: false },
+        ],
+      }),
+      narrative: narrative() as never,
+      version: 'v0.2.0',
+      archivePointer: 'CHANGELOG.md',
+    })
+    const selfcheck = text.slice(text.indexOf('## 0. 30 秒自检'), text.indexOf('## 1. 目标与验收'))
+    /*
+     * §0 is a list of things to run *first*, so a project the session glanced
+     * at once must not take a line there — that is the defect this change
+     * exists to fix. It stays in §4's matrix, where the full map belongs.
+     */
+    expect(selfcheck).toContain('`cd a && npm run check`')
+    expect(selfcheck).not.toContain('`cd b && npm run check`')
+    expect(selfcheck).toContain('本次未涉及：`b`（1/12 次工具调用）')
+    expect(text.slice(text.indexOf('## 4.'))).toContain('`cd b && npm run check`')
+  })
+
+  it('gives §0 two lines when the change really spans two projects', () => {
+    const { text } = renderDocument({
+      facts: facts({
+        commands: [
+          { command: 'cd a && npm run check', origin: 'a/package.json#scripts.check', proves: '全部检查通过' },
+          { command: 'cd b && npm run check', origin: 'b/package.json#scripts.check', proves: '全部检查通过' },
+        ],
+        scope: [
+          { directory: 'a', calls: 9, totalCalls: 12, focus: true },
+          { directory: 'b', calls: 7, totalCalls: 12, focus: false },
+        ],
+      }),
+      narrative: narrative() as never,
+      version: 'v0.2.0',
+      archivePointer: 'CHANGELOG.md',
+    })
+    const selfcheck = text.slice(text.indexOf('## 0. 30 秒自检'), text.indexOf('## 1. 目标与验收'))
+    // Both were worked in, so both are §0's business; order still leads with
+    // the one that got more attention.
+    expect(selfcheck).toContain('`cd a && npm run check`')
+    expect(selfcheck).toContain('`cd b && npm run check`')
+    expect(selfcheck.indexOf('cd a && npm run check')).toBeLessThan(
+      selfcheck.indexOf('cd b && npm run check'),
+    )
+    expect(selfcheck).not.toContain('本次未涉及')
+  })
+
+  it('puts the worked-in project first in the §4 matrix', () => {
+    const { text } = renderDocument({
+      facts: facts({
+        commands: [
+          { command: 'cd b && npm run check', origin: 'b/package.json#scripts.check', proves: '全部检查通过' },
+          { command: 'cd a && npm run check', origin: 'a/package.json#scripts.check', proves: '全部检查通过' },
+        ],
+        scope: [
+          { directory: 'a', calls: 9, totalCalls: 12, focus: true },
+          { directory: 'b', calls: 1, totalCalls: 12, focus: false },
+        ],
+      }),
+      narrative: narrative() as never,
+      version: 'v0.2.0',
+      archivePointer: 'CHANGELOG.md',
+    })
+    expect(text).toContain('**a**（本次工作范围）')
+    expect(text.indexOf('**a**')).toBeLessThan(text.indexOf('**b**'))
+  })
+
+  it('keeps both commands even when one project was never touched', () => {
+    const { text } = renderDocument({
+      facts: facts({
+        commands: [
+          { command: 'cd a && npm run check', origin: 'a/package.json#scripts.check', proves: '全部检查通过' },
+          { command: 'cd b && npm run check', origin: 'b/package.json#scripts.check', proves: '全部检查通过' },
+        ],
+        scope: [
+          { directory: 'a', calls: 9, totalCalls: 12, focus: true },
+          { directory: 'b', calls: 0, totalCalls: 12, focus: false },
+        ],
+      }),
+      narrative: narrative() as never,
+      version: 'v0.2.0',
+      archivePointer: 'CHANGELOG.md',
+    })
+    // A change that spans two projects must still tell the successor to verify
+    // both; demoting is not deleting.
+    expect(text).toContain('`cd b && npm run check`')
+  })
+
+  it('says nothing about scope when the log named no project', () => {
+    const { text } = renderDocument({
+      facts: facts({
+        commands: [
+          { command: 'cd a && npm run check', origin: 'a/package.json#scripts.check', proves: '全部检查通过' },
+          { command: 'cd b && npm run check', origin: 'b/package.json#scripts.check', proves: '全部检查通过' },
+        ],
+        scope: [],
+      }),
+      narrative: narrative() as never,
+      version: 'v0.2.0',
+      archivePointer: 'CHANGELOG.md',
+    })
+    expect(text).not.toContain('本次未涉及')
+    expect(text).not.toContain('本次工作范围')
+  })
+
   it('writes the archive pointer into §9 and no history content', () => {
     const { text } = renderDocument({
       facts: facts(),

@@ -21,8 +21,11 @@
  * passing means. When nothing documents it, `proves` says so plainly
  * ("脚本名推断"), which is a different fact from "verified by the project".
  */
+import { join } from 'node:path'
+import type { SessionEventLike } from './contracts.ts'
 import type { GitFacts, ProjectCommand } from './handoff-doc.ts'
 import type { WorkspaceFiles } from './workspace-fs.ts'
+import { readWorkScope, type WorkScope } from './work-scope.ts'
 
 /** Everything the plugin knows about a project before asking the model anything. */
 export interface ProjectFacts {
@@ -34,6 +37,17 @@ export interface ProjectFacts {
   readonly commands: readonly ProjectCommand[]
   readonly stack: readonly string[]
   readonly git: GitFacts | undefined
+  /** Which sub-projects the session actually worked in, most-worked first. */
+  readonly scope: readonly WorkScope[]
+  /**
+   * Absolute path of the directory the session focused on, when there is one.
+   *
+   * The caller reads git facts from here rather than from the workspace root:
+   * a multi-project workspace is often not a repository at all, and "branch
+   * unknown" for the one project actually being edited is a worse fact than no
+   * fact.
+   */
+  readonly focusRoot: string | undefined
 }
 
 /** Files that identify a stack, in the order they are reported. */
@@ -93,6 +107,13 @@ export async function readProjectFacts(input: {
   slug: string
   /** Injected so tests need not run git. */
   readonly git?: GitFacts | undefined
+  /**
+   * The session's own log, used only to rank sub-projects by attention.
+   *
+   * Optional: a caller without a log (a manual script, a test) gets the old
+   * behaviour, where sub-projects are reported in directory order.
+   */
+  readonly events?: readonly SessionEventLike[] | undefined
 }): Promise<ProjectFacts> {
   const { files } = input
 
@@ -107,8 +128,16 @@ export async function readProjectFacts(input: {
   const readme = await readReadme(files)
 
   const rootCommands = rankCommands([...scripts, ...makeTargets], readme)
-  const commands =
-    rootCommands.length > 0 ? rootCommands : await readSubprojectCommands(files)
+  /*
+   * Rank sub-projects by what the session touched, then fall back to directory
+   * order. `scope` is empty whenever the log names no sub-project, which keeps
+   * this identical to the old behaviour for a workspace that was never worked
+   * in — and for every caller that does not pass a log.
+   */
+  const subCommands =
+    rootCommands.length > 0 ? [] : await readSubprojectCommands(files, input.events)
+
+  const commands = rootCommands.length > 0 ? rootCommands : subCommands
 
   /*
    * A workspace with no manifest of its own has no stack of its own either, and
@@ -118,6 +147,10 @@ export async function readProjectFacts(input: {
   const effectiveStack =
     stack.length > 0 ? stack : commands.length > 0 ? await readSubprojectStack(files) : []
 
+  const scope =
+    rootCommands.length > 0 ? [] : readWorkScope(input.events, subProjectNames(commands))
+  const focus = scope.find((entry) => entry.focus)
+
   return {
     slug: input.slug,
     title: manifest?.name ?? input.slug,
@@ -125,7 +158,29 @@ export async function readProjectFacts(input: {
     commands,
     stack: effectiveStack,
     git: input.git,
+    scope,
+    focusRoot:
+      focus === undefined || input.cwd === undefined ? undefined : join(input.cwd, focus.directory),
   }
+}
+
+/**
+ * Sub-project directory names referenced by a command list.
+ *
+ * Read back out of the `cd <dir> && ` prefix the command already carries, so
+ * the scope candidates are exactly the directories that produced a command.
+ * Nothing is parsed from the log itself: a directory earns a scope only if it
+ * is a project the document would otherwise talk about.
+ */
+function subProjectNames(commands: readonly ProjectCommand[]): readonly string[] {
+  const names: string[] = []
+  for (const command of commands) {
+    const match = /^cd\s+(\S+)\s*&&/.exec(command.command)
+    if (match === null) continue
+    const name = match[1]!
+    if (!names.includes(name)) names.push(name)
+  }
+  return names
 }
 
 /**
@@ -157,7 +212,10 @@ const SUBPROJECT_SCAN_DEPTH = 1
  * workspace with two hundred folders cannot turn §0 into a listing. Ordering is
  * directory order, which is stable and matches what the user sees in an editor.
  */
-async function readSubprojectCommands(files: WorkspaceFiles): Promise<readonly ProjectCommand[]> {
+async function readSubprojectCommands(
+  files: WorkspaceFiles,
+  events?: readonly SessionEventLike[] | undefined,
+): Promise<readonly ProjectCommand[]> {
   if (SUBPROJECT_SCAN_DEPTH < 1) return []
   const names = await files.list('.')
   const found: ProjectCommand[] = []
@@ -173,9 +231,38 @@ async function readSubprojectCommands(files: WorkspaceFiles): Promise<readonly P
      * so the one kept is the most informative.
      */
     for (const command of scripts.slice(0, 1)) found.push(command)
-    if (found.length >= 6) break
   }
-  return found
+
+  /*
+   * Directory order is the fallback, not the answer.
+   *
+   * The successor is told to run §0's commands before doing anything, so their
+   * order is a recommendation. With no signal it must be stable and match what
+   * the user sees in an editor; with a log it must put the project this session
+   * actually worked in first.
+   */
+  const ordered = orderByScope(found, events)
+  return ordered.slice(0, 6)
+}
+
+/**
+ * Put the session's focus first, then the untouched projects in directory order.
+ *
+ * Only the focus is moved. Demoting by usage *count* would reshuffle the list
+ * between two handoffs of the same session for no benefit; what matters is
+ * which project the successor should check first, and after that a stable
+ * order is easier to diff than a ranking.
+ */
+function orderByScope(
+  commands: readonly ProjectCommand[],
+  events: readonly SessionEventLike[] | undefined,
+): readonly ProjectCommand[] {
+  const scope = readWorkScope(events, subProjectNames(commands))
+  const focus = scope.find((entry) => entry.focus)
+  if (focus === undefined) return commands
+  const isFocus = (command: ProjectCommand): boolean =>
+    new RegExp(`^cd\\s+${escapeRegExp(focus.directory)}\\s*&&`).test(command.command)
+  return [...commands.filter(isFocus), ...commands.filter((command) => !isFocus(command))]
 }
 
 /** A manifest inside a sub-directory, if it has one. */

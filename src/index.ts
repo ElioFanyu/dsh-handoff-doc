@@ -251,19 +251,34 @@ export function apply(ctx: Context, config: ConfigShape): void {
     }
     const files = createWorkspaceFiles(cwd)
     const project = resolveProject(live.handoffProjectFolder, cwd)
+    /*
+     * Project facts come first, because reading them is what decides which
+     * directory the git facts should describe.
+     *
+     * In a multi-project workspace the root is usually not a repository, so
+     * reading git there reports "unknown" for a session that was editing one
+     * repo all along. The focus directory is where the work happened; its
+     * branch and HEAD are the ones that make the document's validity check
+     * meaningful.
+     */
     const projectFacts = await readProjectFacts({
       files,
       cwd,
       slug: project,
-      git: await readGitFacts(files),
+      events,
     })
+    const git = await readGitFacts(
+      projectFacts.focusRoot === undefined ? files : createWorkspaceFiles(projectFacts.focusRoot),
+    )
+    const projectFactsWithGit = { ...projectFacts, git }
 
     const createdAt = Date.now()
     const docFacts: DocFacts = {
       project,
       cwd,
-      commands: projectFacts.commands,
-      stack: projectFacts.stack,
+      commands: projectFactsWithGit.commands,
+      stack: projectFactsWithGit.stack,
+      ...(projectFactsWithGit.scope.length === 0 ? {} : { scope: projectFactsWithGit.scope }),
       agentPreset: facts.agentPreset,
       provider: facts.provider,
       model: facts.model,
@@ -274,7 +289,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
       turnCount: facts.turnCount,
       occupancyPercent: percentOf(facts.occupancy),
       occupancyQuality: facts.occupancy.quality,
-      ...(projectFacts.git === undefined ? {} : { git: projectFacts.git }),
+      ...(projectFactsWithGit.git === undefined ? {} : { git: projectFactsWithGit.git }),
       sourceSessionId: agent.id,
       createdAt,
       ...(pendingInput === undefined ? {} : { pendingInput: toDocPending(pendingInput) }),

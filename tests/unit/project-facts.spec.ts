@@ -1,3 +1,4 @@
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { readProjectFacts, stackFromDeps } from '@src/project-facts.ts'
 import { createMemoryFiles } from '@src/workspace-fs.ts'
@@ -170,6 +171,57 @@ describe('stackFromDeps', () => {
  * to go and invent one: advice that is not merely useless but wrong.
  */
 describe('readProjectFacts — workspace with no root manifest', () => {
+  /*
+   * Order is a recommendation: the successor is told to run §0's commands
+   * before anything else, so whichever project this session actually worked in
+   * belongs at the top. Without a log the order stays directory order, which is
+   * stable and matches the editor.
+   */
+  it('puts the project named by the session log first', async () => {
+    const files = createMemoryFiles({
+      'plugin-a/package.json': JSON.stringify({ scripts: { check: 'tsc' } }),
+      'plugin-b/package.json': JSON.stringify({ scripts: { check: 'tsc && vitest run' } }),
+    })
+    const events = [
+      { type: 'tool/call', seq: 1, data: { name: 'ops_bash', arguments: '{"command":"cd plugin-b && npm test"}' } },
+      { type: 'tool/call', seq: 2, data: { name: 'ops_bash', arguments: '{"command":"ls plugin-b/src"}' } },
+    ]
+    const facts = await readProjectFacts({ files, cwd: '/w', slug: 'w', events })
+    expect(facts.commands[0]!.command).toBe('cd plugin-b && npm run check')
+    expect(facts.scope.find((entry) => entry.focus)?.directory).toBe('plugin-b')
+    expect(facts.focusRoot).toBe(join('/w', 'plugin-b'))
+  })
+
+  it('keeps directory order when no log names a project', async () => {
+    const facts = await readProjectFacts({
+      files: createMemoryFiles({
+        'plugin-a/package.json': JSON.stringify({ scripts: { check: 'tsc' } }),
+        'plugin-b/package.json': JSON.stringify({ scripts: { check: 'tsc' } }),
+      }),
+      cwd: '/w',
+      slug: 'w',
+      events: [],
+    })
+    expect(facts.commands[0]!.command).toBe('cd plugin-a && npm run check')
+    expect(facts.scope).toEqual([])
+    expect(facts.focusRoot).toBeUndefined()
+  })
+
+  it('has no scope when the root manifest supplies the commands', async () => {
+    const facts = await readProjectFacts({
+      files: createMemoryFiles({ 'package.json': JSON.stringify({ scripts: { check: 'tsc' } }) }),
+      cwd: '/w',
+      slug: 'w',
+      events: [
+        { type: 'tool/call', seq: 1, data: { name: 'ops_bash', arguments: '{"command":"ls"}' } },
+      ],
+    })
+    // One project, one scope: ranking would invent a distinction that does not
+    // exist, and the flat matrix is the better shape.
+    expect(facts.scope).toEqual([])
+    expect(facts.focusRoot).toBeUndefined()
+  })
+
   it('reads one level down and names each sub-project', async () => {
     const facts = await readProjectFacts({
       files: createMemoryFiles({
