@@ -252,6 +252,38 @@ describe('Coordinator — refusals and failures', () => {
     expect(result.text).toContain('空白会话')
   })
 
+  /*
+   * Observed for real: one session ran `/handoff` twice, ten minutes and 221
+   * tool calls apart. The first successor received a snapshot of a session that
+   * was still working; the second received a different one. Two live successors
+   * for one line of work, each holding a document that contradicted the other,
+   * and the first was never told.
+   */
+  it('refuses to hand the same session off twice', async () => {
+    const coordinator = new Coordinator(deps())
+    const first = await coordinator.run(handoff(idleAgent()))
+    expect(first.ok).toBe(true)
+
+    const second = await coordinator.run(handoff(idleAgent()))
+    expect(second.ok).toBe(false)
+    expect(second.error).toBe('already-handed-off')
+    expect(second.text).toContain('new-1')
+    expect(second.text).toContain('已经交接过一次')
+  })
+
+  it('still allows compaction after a handoff, since it moves no session', async () => {
+    const coordinator = new Coordinator(deps())
+    await coordinator.run(handoff(idleAgent()))
+    const compacted = await coordinator.run({
+      sessionId: 's1',
+      agent: idleAgent(),
+      kind: 'compact',
+      reason: 'manual',
+      automatic: false,
+    })
+    expect(compacted.error).not.toBe('already-handed-off')
+  })
+
   it('records a failure for the status surface', async () => {
     const coordinator = new Coordinator(
       deps({

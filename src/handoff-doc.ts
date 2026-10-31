@@ -43,7 +43,7 @@
  * missing required sections is rejected before any session is created.
  */
 import { redactWithReport } from './redaction.ts'
-import { scopesInPlay, type WorkScope } from './work-scope.ts'
+import { focusLooksWrong, scopesInPlay, type WorkScope } from './work-scope.ts'
 
 /** One section of the document: a stable key, the heading, and what goes in it. */
 export interface DocSection {
@@ -66,6 +66,7 @@ export type DocSectionKey =
   | 'files'
   | 'rejected'
   | 'verified'
+  | 'decisions'
   | 'history'
 
 /**
@@ -148,8 +149,17 @@ export const DOC_SECTIONS: readonly DocSection[] = [
     required: true,
   },
   {
+    key: 'decisions',
+    heading: '## 9. 待用户决策',
+    instruction:
+      '「已经想好要改、但还没得到用户批准」的事项，一条一行，写明：改什么、为什么、影响范围、'
+      + '以及不做的后果。**继任者必须先问用户，不得自行执行。** 没有就只写「无」。'
+      + '不要把已批准或已完成的改动写在这里。',
+    required: false,
+  },
+  {
     key: 'history',
-    heading: '## 9. 历史',
+    heading: '## 10. 历史',
     instruction: '只写一行指针，指向归档文件。不要在这里写任何历史内容。',
     required: false,
   },
@@ -391,7 +401,7 @@ export function buildDocPrompt(input: {
     '## 硬性规则（违反则整份作废，重新生成）',
     '',
     '1. **只写现在仍然成立的事实。** 判断标准：这句话今天是否为真。凡是「之前是…后来改成…」「我们讨论过…」「第一版曾经…」一律删掉。',
-    '2. **本文件是快照，不是日志，每次交接都整份重写。** 历史不进这里，§9 只写一行指向 CHANGELOG.md 的指针。',
+    '2. **本文件是快照，不是日志，每次交接都整份重写。** 历史不进这里，§10 只写一行指向 CHANGELOG.md 的指针。',
     /*
      * The rule the model reliably ignores without being told twice.
      *
@@ -414,14 +424,25 @@ export function buildDocPrompt(input: {
      * §4 entirely are different acts — but a model under space pressure will
      * conflate them unless the boundary is drawn explicitly.
      */
-    '   - **本条只删内容，不删小节。** 十个标题一个都不能少；§4「下一步」永远要写，',
+    '   - **本条只删内容，不删小节。** 十一个小标题一个都不能少；§4「下一步」永远要写，',
     '     哪怕只是「当前没有待办，接手先跑 §0」。删掉整节会被校验器拒绝，交接直接失败。',
     '4. **不写行号。** 行号第二天就过期。写职责，不写位置。',
     '5. **不编造验证结果。** 只有你真的执行过、并看到输出的，才能写进 §8 的「已验证」；否则写进「未验证」并给出验证方法。',
     '6. **不要用「未知」糊弄。** 对话记录里有线索就必须写出具体内容；只有记录里确实没有时，才写「未知」并说明缺什么。',
     '7. **不写密钥、令牌、密码、连接串的值。** 需要引用时只写键名。',
-    '8. **§0 必须能直接照做。** 写命令和预期输出，不写「建议先检查一下环境」。',
-    '9. **总长控制在约 ' + Math.round(input.budgetChars / 1000) + ' 千字符以内。** 超了会被程序截断，截断发生在你最需要保留的段落上。',
+    /*
+     * A document that states its own size is wrong the moment it is written.
+     *
+     * A live document said "本文件自身 16792 字符" while the file on disk was
+     * 17634: the number was measured mid-generation, before archiving and before
+     * the program appended its own §0 lines. The successor cannot tell a stale
+     * measurement from a real limit, and `fitToBudget` already knows the true
+     * size — writing a copy by hand only creates a fact that expires instantly.
+     */
+    '8. **不要写本文件自身的字符数或大小。** 你不会算对：文件在你写完之后还会被程序追加内容。'
+      + '篇幅约束只按第 9 条理解，不要把它写进正文。',
+    '9. **§0 必须能直接照做。** 写命令和预期输出，不写「建议先检查一下环境」。',
+    '10. **总长控制在约 ' + Math.round(input.budgetChars / 1000) + ' 千字符以内。** 超了会被程序截断，截断发生在你最需要保留的段落上。',
     /*
      * The human's aside often asks for something the document rules forbid
      * ("record everything we did in detail"). The aside outranks §4 of the
@@ -431,7 +452,7 @@ export function buildDocPrompt(input: {
      * prompt — it only travels on the pointer.
      */
     '   - 若某条要求会让文档变长（例如「详细记录所有操作」），**必需小节优先**：',
-    '     先保证十个标题齐全、§0/§1/§2/§4/§6/§8 各有一句可执行内容，再用剩余篇幅写细节。',
+    '     先保证十一个标题齐全、§0/§1/§2/§4/§6/§8 各有一句可执行内容，再用剩余篇幅写细节。',
     '     写不完的细节，宁可概括成「详见 CHANGELOG」，也不要牺牲小节完整性。',
     /*
      * Order of operations, stated as a rule rather than a suggestion.
@@ -442,7 +463,7 @@ export function buildDocPrompt(input: {
      * gets no session at all — far worse than a thin document. One line of
      * prompt removes that whole failure mode.
      */
-    '10. **先写必需小节，再补可选小节。** 必需小节是：' + REQUIRED_HEADINGS.join('、') + '。',
+    '11. **先写必需小节，再补可选小节。** 必需小节是：' + REQUIRED_HEADINGS.join('、') + '。',
     '   若篇幅快用完，**先保证这些小节各有一句可执行的内容**，宁可让可选小节只写「无」。',
     '   任何必需小节为空，整份交接会被拒绝、新会话不会建立——这比写得简短更糟。',
     '',
@@ -669,6 +690,36 @@ export function missingRequired(narrative: DocNarrative): readonly DocSectionKey
 }
 
 /**
+ * Does §9 carry proposals the successor must ask about before acting?
+ *
+ * "无" and its variants are the explicit empty answer the prompt asks for, so
+ * they must not count as a pending decision — otherwise every handoff would
+ * begin with a warning and the warning would stop meaning anything. Anything
+ * else counts, because a false "ask the user first" costs one question while a
+ * false negative costs an unapproved change.
+ *
+ * The empty answer is allowed a trailing parenthetical: writers explain *why*
+ * there is nothing pending ("无（上一轮的 A/B 已获批准）"), and that explanation
+ * is not itself a proposal. Only the leading marker decides, and it must be
+ * followed by nothing but punctuation or a bracketed remark — 「无，但要改 X」
+ * stays positive because content follows outside the brackets.
+ */
+export function hasOpenDecisions(narrative: DocNarrative | undefined): boolean {
+  const body = narrative?.decisions
+  if (typeof body !== 'string') return false
+  const trimmed = body.trim()
+  if (trimmed.length === 0) return false
+  /*
+   * Only these shapes count as "nothing pending":
+   *   无 / 无。 / 无（说明） / 无（说明）。 / none / n/a
+   * A comma never qualifies — 「无，但要改 X」 carries real content after it.
+   */
+  return !/^(?:无|没有|暂无|none|n\/a)\s*(?:[。.．!！]|（[^）]*）[。.．!！]?|\([^)]*\)[。.．!！]?)?\s*$/i.test(
+    trimmed,
+  )
+}
+
+/**
  * Reject a document that cannot be used.
  *
  * The successor is told "read §0, then §2, then §4". A document missing §4 has
@@ -702,7 +753,7 @@ export function renderDocument(input: {
   const clean = (body: string): string => {
     const result = redactWithReport(body)
     for (const rule of result.applied) applied.add(rule)
-    return result.text.trim()
+    return stripSelfSize(result.text).trim()
   }
 
   const sectionBody = (key: DocSectionKey, fallback: string): string => {
@@ -726,6 +777,13 @@ export function renderDocument(input: {
   parts.push(
     DOC_SECTIONS.find((s) => s.key === 'selfcheck')!.heading,
     '',
+    /*
+     * The program's own warning goes ABOVE the model's prose: it is the fact the
+     * successor must not miss, and the model may write "无补充" (as it does when
+     * it has nothing to add). A warning that only the model could supply would
+     * be exactly the wrong place for it.
+     */
+    ...scopeWarning(facts),
     sectionBody('selfcheck', '无补充'),
     '',
     '### 命令与环境（程序读取）',
@@ -800,6 +858,19 @@ export function renderDocument(input: {
   )
 
   // ---- §9 ------------------------------------------------------------------
+  /*
+   * The pending-decision channel.
+   *
+   * A session often ends with work it has *decided* to do but was never allowed
+   * to do — "I recommend fixing X and Y; which do you want?" — and that question
+   * used to die with the session. The successor then read §4, saw a task, and
+   * executed a change the human had never approved. Carrying the open question
+   * across the boundary is the whole point of this section, so it renders even
+   * when empty: an explicit「无」is a fact, and its absence is not.
+   */
+  parts.push(DOC_SECTIONS.find((s) => s.key === 'decisions')!.heading, '', sectionBody('decisions', '无'), '')
+
+  // ---- §10 -----------------------------------------------------------------
   parts.push(
     DOC_SECTIONS.find((s) => s.key === 'history')!.heading,
     '',
@@ -821,9 +892,52 @@ export function renderDocument(input: {
   return { text: parts.join('\n').replace(/\n{3,}/g, '\n\n'), redactions: [...applied] }
 }
 
+/**
+ * The one warning that has to survive even when the model adds nothing.
+ *
+ * When the scope detector cannot see the project this session actually worked
+ * in, the document is named after the wrong one and §0 lists the wrong
+ * commands. The model often writes "无补充" to §0, so this line is injected by
+ * the program rather than left to the narrative — it is the difference between a
+ * successor that re-checks and one that runs a stranger's test suite.
+ */
+function scopeWarning(facts: DocFacts): readonly string[] {
+  const scope = facts.scope ?? []
+  const focus = scope.find((entry) => entry.focus)
+  if (focus === undefined || !focusLooksWrong(scope)) return []
+  return [
+    `- ⚠ **工作范围无法可靠判定**：得分最高的候选是 \`${focus.directory}\`，但本次 ${focus.totalCalls} 次工具调用里它只被点名 ${focus.calls} 次。`,
+    '  这通常意味着候选目录扫描漏掉了真正的项目（例如没有 `package.json` 的仓库）。',
+    '  **先自行确认再动手**：`git -C <候选目录> status --porcelain` 有未提交改动、且 `git log --oneline -1` 与交接时间吻合的那一个，才是真正的工作项目。',
+    '',
+  ]
+}
+
+/**
+ * Remove a model-written claim about this document's own size.
+ *
+ * The prompt forbids it, but the prompt is advice and this failure is quiet: a
+ * document that says "本文件自身 16792 字符" while the file is 17634 characters
+ * teaches the successor that numbers here are approximate. That lesson is worse
+ * than the number being wrong, and it repeats on every regeneration because the
+ * model measures mid-generation, before §0's program lines exist.
+ *
+ * Deleting rather than correcting, because even here the final length is
+ * unknown — §0 has not been appended yet. The one component that knows the true
+ * size is `fitToBudget`, and it does not publish.
+ *
+ * Matched narrowly: a self-reference ("本文件" / "本文") plus a number plus a
+ * unit. Ordinary prose about a *budget* ("上限 24000 字符") must survive,
+ * because that is a real setting rather than a measurement of this file.
+ */
+export function stripSelfSize(body: string): string {
+  const pattern =
+    /本(?:文件|文)(?:自身|本身|当前|总共)?\s*(?:约|共|有|为)?\s*[0-9][0-9,，]*\s*(?:个)?\s*(?:字符|字|字节|bytes|chars)/gi
+  return body.replace(pattern, '本文件（长度由程序维护，勿在此声明）')
+}
+
 /** The program-read part of §0: what to run, and what "good" looks like. */
-export function selfCheckLines(facts: DocFacts): readonly string[] {
-  const lines: string[] = []
+export function selfCheckLines(facts: DocFacts): readonly string[] {  const lines: string[] = []
   /*
    * Which commands are actually this session's.
    *
@@ -839,6 +953,13 @@ export function selfCheckLines(facts: DocFacts): readonly string[] {
   const focusPrefix = focus === undefined ? undefined : `cd ${focus.directory} && `
   const inPlay = scopesInPlay(scope)
   const inPlayPrefixes = inPlay.map((entry) => `cd ${entry.directory} && `)
+  /*
+   * A focus that accounts for almost none of the session is a failed search, not
+   * a finding. Saying so here — in §0, before the command list — is what stops a
+   * successor from running the wrong project's checks while believing they are
+   * the self-check. This is the §2/§0 counterpart of the pointer warning.
+   */
+  const scopeSuspect = focusLooksWrong(scope)
 
   const primary = facts.commands.filter((entry) => isVerification(entry.command))
   /*
@@ -867,6 +988,17 @@ export function selfCheckLines(facts: DocFacts): readonly string[] {
   if (inScope.length === 0) {
     lines.push(
       '- 命令：项目里尚未发现可识别的验证命令 → 接手第一件事是建立一条（哪怕是 `npm test`）。',
+    )
+  } else if (scopeSuspect) {
+    /*
+     * The command list below is untrustworthy: the project it was built around
+     * holds almost none of the session's calls. Naming the commands anyway, with
+     * the warning above them, would be worse than omitting them — the successor
+     * runs the first line it sees and calls it a self-check.
+     */
+    lines.push(
+      '- 命令：**未能可靠判定该跑哪些项目的检查**（见上一行的告警）。',
+      '  → 先用 `git status --porcelain` 找出真正有改动的仓库，再在它下面跑该仓库的验证命令。',
     )
   } else {
     /*
@@ -909,9 +1041,18 @@ export function selfCheckLines(facts: DocFacts): readonly string[] {
     }`,
   )
   if (facts.git !== undefined) {
+    /*
+     * "as of the handoff" is not pedantry: the successor creates files too, and
+     * a bare count then reads as a promise that the tree is still that size. A
+     * live record reported "7 个未提交改动" minutes after that record itself had
+     * become the eighth. Naming the moment costs three characters and stops the
+     * successor from auditing a number that was never wrong.
+     */
     lines.push(
       `- 版本：${facts.git.branch ?? '?'} @ ${(facts.git.head ?? '?').slice(0, 8)}${
-        facts.git.dirty ? `（${facts.git.changedFiles} 个未提交改动）` : '（工作区干净）'
+        facts.git.dirty
+          ? `（交接时 ${facts.git.changedFiles} 个未提交改动；此后新增的文件不计入）`
+          : '（工作区干净）'
       }`,
     )
   }
@@ -1238,8 +1379,25 @@ export function renderPointer(input: {
   pendingInput?: PendingInputFacts | undefined
   /** The human's own instruction for the successor; never part of the document. */
   instruction?: string | undefined
+  /**
+   * Whether the previous document carried unfinished proposals in §9.
+   *
+   * The successor must be told to ask rather than act, and the pointer is the
+   * first thing it reads — a sentence inside §9 is reached only after it has
+   * already decided what to do. Passed in rather than re-parsed so the two
+   * halves cannot disagree about what "pending" means.
+   */
+  hasPendingDecisions?: boolean | undefined
 }): string {
   const focus = input.scope?.find((entry) => entry.focus)
+  /*
+   * A focus that accounts for almost none of the session's calls is not a
+   * finding, it is a failed search. Saying so is the difference between a
+   * successor that re-checks the scope and one that trusts a wrong project name
+   * — the failure that filed a 268-call Electron session under a directory it
+   * had named twice.
+   */
+  const scopeSuspect = focusLooksWrong(input.scope ?? [])
   /*
    * The pointer's own "run this first" list obeys the same rule as §0: the
    * project this session worked in comes first, and a project it only glanced
@@ -1270,16 +1428,24 @@ export function renderPointer(input: {
     `- 有效期：${input.validUntil}`,
     ...(focus === undefined
       ? []
-      : [
-          `- 本会话的工作范围：\`${focus.directory}\`（${focus.calls}/${focus.totalCalls} 次工具调用）`,
-          `  未涉及的项目：${
-            input.scope?.filter((entry) => !entry.focus).length === 0
-              ? '（无）'
-              : input.scope!
-                  .filter((entry) => !entry.focus)
-                  .map((entry) => `\`${entry.directory}\``)
-                  .join('、')
-          }`,
+      : scopeSuspect
+        ? [
+            `- ⚠ 工作范围无法可靠判定：得分最高的候选是 ${focus.directory}，`,
+            `  但它在本次 ${focus.totalCalls} 次工具调用里只被点名 ${focus.calls} 次。`,
+            '  这通常意味着候选目录扫描漏掉了真正的项目（例如没有 package.json 的仓库）。',
+            '  **动手前先自行确认**：`git -C <候选目录> status --porcelain` 有未提交改动、',
+            '  或 `git log --oneline -1` 与交接时间吻合的那一个，才是真正的工作项目。',
+          ]
+        : [
+            `- 本会话的工作范围：\`${focus.directory}\`（${focus.calls}/${focus.totalCalls} 次工具调用）`,
+            `  未涉及的项目：${
+              input.scope?.filter((entry) => !entry.focus).length === 0
+                ? '（无）'
+                : input.scope!
+                    .filter((entry) => !entry.focus)
+                    .map((entry) => `\`${entry.directory}\``)
+                    .join('、')
+            }`,
         ]),
     '',
     '**读取顺序（不要整份通读）：**',
@@ -1310,8 +1476,25 @@ export function renderPointer(input: {
     '**不要做的事：** 不要重复 §1 里已经验收通过的项；不要重试 §7 里已否决的方案；',
     '不要把 §8「未验证」当成已验证。',
     '',
-    '读完 §0 后，用一句话报告自检结果，再开始 §4。',
   )
+
+  /*
+   * The one instruction that outranks §4's task list.
+   *
+   * A session can end with work it has decided on but has not been allowed to
+   * do. Previously that question vanished at the boundary and the successor read
+   * §4 as a work order, executing a change the human had never approved. Stated
+   * before the reading order so it is in effect when §4 is read, not after.
+   */
+  if (input.hasPendingDecisions === true) {
+    lines.push(
+      '**§9「待用户决策」不是待办事项。** 里面每一条都是上一个会话**已经想好但还没获准**的改动。',
+      '动手前必须先逐条问用户要不要做；用户没明确同意，就一条都不要执行。',
+      '',
+    )
+  }
+
+  lines.push('读完 §0 后，用一句话报告自检结果，再开始 §4。')
 
   /*
    * The user's own instruction, carried beside the pointer rather than inside
@@ -1346,10 +1529,10 @@ export function renderPointer(input: {
        * question about an unrelated repository. The session's own scope answers
        * it without guessing.
        */
-      ...(focus === undefined
+      ...(focus === undefined || scopeSuspect
         ? [
             '',
-            '**关于附言的范围：** 本会话没有留下明确的工作范围，所以附言里未点名的对象需要先向用户确认，不要自行推断。',
+            '**关于附言的范围：** 本会话的 work scope 无法可靠判定，所以附言里未点名的对象需要先向用户确认，不要自行推断。',
           ]
         : [
             '',

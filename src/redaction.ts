@@ -40,8 +40,17 @@ const RULES: readonly Rule[] = [
     // enough to be one. Quoted values are handled by allowing quotes. The value
     // must not already be a redaction marker, so a second pass over redacted
     // text does not consume the bracket that follows it.
+    //
+    // The value must also *look like a credential*: at least 8 characters of
+    // ASCII with no whitespace and no CJK punctuation. Two real documents were
+    // corrupted before this rule had that guard — prose such as
+    // `TOKENS_PER_CHAR = 1`（中文一字一 token；...） matched because the name
+    // contains TOKEN and the "value" was everything up to the first ASCII
+    // space, so the replacement swallowed the rest of the clause and left
+    // `TOKENS_PER_CHAR=[redacted] token）`. A bare digit or a short word is not
+    // a secret, and treating it as one destroys the sentence that explains it.
     pattern:
-      /\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|APIKEY|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL)[A-Z0-9_]*)\s*[:=]\s*("[^"]{4,}"|'[^']{4,}'|(?!\[redacted\b)[^\s"'\]]{8,})/g,
+      /\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|APIKEY|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL)[A-Z0-9_]*)\s*[:=]\s*("[^"]{8,}"|'[^']{8,}'|(?!\[redacted\b)[A-Za-z0-9_\-+/=.]{8,}(?![A-Za-z0-9_\-+/=.]))/g,
     replacement: '$1=[redacted]',
   },
   {

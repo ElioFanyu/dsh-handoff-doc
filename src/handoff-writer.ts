@@ -30,6 +30,7 @@ import {
   documentIsUsable,
   docPaths,
   fitToBudget,
+  hasOpenDecisions,
   monthOf,
   projectSlug,
   renderDocument,
@@ -186,6 +187,7 @@ export async function writeHandoff(input: WriteHandoffInput): Promise<WriteHando
     ...(input.facts.scope === undefined ? {} : { scope: input.facts.scope }),
     ...(input.facts.pendingInput === undefined ? {} : { pendingInput: input.facts.pendingInput }),
     ...(input.instruction === undefined ? {} : { instruction: input.instruction }),
+    hasPendingDecisions: hasOpenDecisions(input.narrative),
   })
 
   return {

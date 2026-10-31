@@ -11,12 +11,14 @@ import {
   docPaths,
   documentIsUsable,
   fitToBudget,
+  hasOpenDecisions,
   monthOf,
   missingRequired,
   parseDoc,
   projectSlug,
   renderDocument,
   renderPointer,
+  stripSelfSize,
   validityOf,
   type DocFacts,
 } from '@src/handoff-doc.ts'
@@ -54,6 +56,26 @@ describe('redact', () => {
     expect(redact('OPENAI_API_KEY=sk-live-verysecretvalue')).toBe('OPENAI_API_KEY=[redacted]')
     expect(redact('DB_PASSWORD: "correct horse battery"')).toBe('DB_PASSWORD=[redacted]')
     expect(redact('GITHUB_TOKEN=gh_whatever_long_enough')).toBe('GITHUB_TOKEN=[redacted]')
+  })
+
+  /*
+   * Two live documents were corrupted before the value had to look like a
+   * credential. The name `TOKENS_PER_CHAR` contains TOKEN, the "value" was the
+   * single character `1`, and the match ran to the end of the ASCII run —
+   * swallowing the clause that explains the constant:
+   *
+   *   in : `TOKENS_PER_CHAR = 1`（中文一字一 token；0.75 是英文假设）
+   *   out: `TOKENS_PER_CHAR=[redacted] token；0.75 是英文假设）
+   *
+   * A bare number is not a secret. Over-redacting a token is recoverable;
+   * destroying the sentence that documents a constant is not, because the
+   * successor cannot tell it was redacted rather than written that way.
+   */
+  it('leaves a constant assignment to a short literal alone', () => {
+    const text = '换算常量 `TOKENS_PER_CHAR = 1`（中文一字一 token；0.75 是英文假设）'
+    expect(redact(text)).toBe(text)
+    expect(redact('TOKENS_PER_CHAR = 1，才是当前口径')).toBe('TOKENS_PER_CHAR = 1，才是当前口径')
+    expect(redact('MAX_TOKENS=4096')).toBe('MAX_TOKENS=4096')
   })
 
   it('leaves ordinary prose, paths and code alone', () => {
@@ -357,6 +379,32 @@ describe('renderDocument', () => {
     expect(selfcheck.indexOf('25 ✓')).toBeLessThan(selfcheck.indexOf('### 命令与环境'))
   })
 
+  /*
+   * A suspect scope must reach the document too, not only the pointer: the
+   * document is what the successor reads first, and §0 is where it decides what
+   * to run. The line is injected by the program because the model often answers
+   * §0 with "无补充".
+   */
+  it('warns in §0 when the scope explains almost none of the session', () => {
+    const { text } = renderDocument({
+      facts: facts({
+        scope: [
+          { directory: 'wrong', calls: 2, totalCalls: 281, focus: true },
+          { directory: 'other', calls: 1, totalCalls: 281, focus: false },
+        ],
+      }),
+      narrative: narrative() as never,
+      version: 'v0.2.0',
+      archivePointer: 'CHANGELOG.md',
+    })
+    const selfcheck = text.slice(text.indexOf('## 0. 30 秒自检'), text.indexOf('## 1. 目标与验收'))
+    expect(selfcheck).toContain('工作范围无法可靠判定')
+    expect(selfcheck).toContain('281 次工具调用里它只被点名 2 次')
+    // And the wrong commands must not be presented as the self-check.
+    expect(selfcheck).not.toContain('- 命令：`npm run check`')
+    expect(selfcheck).toContain('未能可靠判定该跑哪些项目的检查')
+  })
+
   it('renders the verification matrix in §4 from the discovered commands', () => {
     const { text } = renderDocument({
       facts: facts(),
@@ -511,14 +559,14 @@ describe('renderDocument', () => {
     expect(text).not.toContain('本次工作范围')
   })
 
-  it('writes the archive pointer into §9 and no history content', () => {
+  it('writes the archive pointer into §10 and no history content', () => {
     const { text } = renderDocument({
       facts: facts(),
       narrative: narrative({ history: '（模型试图写历史）我们上周改成了新架构' }) as never,
       version: 'v0.2.0',
       archivePointer: 'docs/handoff/my-app/CHANGELOG.md',
     })
-    const history = text.slice(text.indexOf('## 9. 历史'))
+    const history = text.slice(text.indexOf('## 10. 历史'))
     expect(history).toContain('docs/handoff/my-app/CHANGELOG.md')
     expect(history).not.toContain('我们上周改成了新架构')
   })
@@ -794,6 +842,35 @@ describe('renderPointer', () => {
     expect(message).not.toContain('默认指本会话的工作范围')
   })
 
+  /*
+   * The failure this prevents, observed for real: an Electron project with no
+   * `package.json` was invisible to the candidate scan, so a directory the
+   * session had named twice became "the work scope" of a 281-call session. The
+   * pointer then told the successor to verify two unrelated projects, and said
+   * nothing about the mismatch. A suspect scope must be reported as suspect, not
+   * dressed up as a finding.
+   */
+  it('warns instead of asserting a scope that explains almost none of the session', () => {
+    const message = renderPointer({
+      documentPath: 'docs/handoff/wrong/HANDOFF.md',
+      absolutePath: '/w/docs/handoff/wrong/HANDOFF.md',
+      project: 'wrong',
+      validUntil: 'x',
+      commands: [{ command: 'cd other && npm run check', origin: 'other/package.json', proves: '通过' }],
+      scope: [
+        { directory: 'wrong', calls: 2, totalCalls: 281, focus: true },
+        { directory: 'other', calls: 1, totalCalls: 281, focus: false },
+      ],
+      instruction: '推送 GitHub',
+    })
+    expect(message).toContain('工作范围无法可靠判定')
+    expect(message).toContain('281 次工具调用')
+    expect(message).toContain('281 次工具调用里只被点名 2 次'.slice(0, 6))
+    // It must not simultaneously assert the wrong name as the scope.
+    expect(message).not.toContain('本会话的工作范围：`wrong`')
+    expect(message).toContain('需要先向用户确认，不要自行推断')
+  })
+
   it('stays short even with a scope and an instruction', () => {
     const message = renderPointer({
       documentPath: 'docs/handoff/w/HANDOFF.md',
@@ -952,3 +1029,127 @@ describe('readPendingInput — is the outgoing session still waiting?', () => {
 /** A sanity check that the old `SessionFacts` shape still compiles where used. */
 const _factsShape: SessionFacts | undefined = undefined
 void _factsShape
+
+describe('the document must not assert its own size', () => {
+  /*
+   * A live document said "本文件自身 16792 字符" while the file on disk was
+   * 17634: the model measured mid-generation, before §0's program lines were
+   * appended. The prompt forbids it now, and this strips it if the model forgets.
+   */
+  it('strips a self-size claim the model slipped in', () => {
+    expect(stripSelfSize('本文件自身 16792 字符')).not.toContain('16792')
+    expect(stripSelfSize('本文共 12,345 字节')).not.toContain('12,345')
+    expect(stripSelfSize('本文件当前 900 字符。')).not.toContain('900')
+  })
+
+  it('leaves real budget statements alone', () => {
+    const prose = '交接文档上限 24000 字符，超出后按优先级整节省略。'
+    expect(stripSelfSize(prose)).toBe(prose)
+    const more = 'handoffDocMaxChars 是最终文件字符数（默认 24000，范围 2000–120000）'
+    expect(stripSelfSize(more)).toBe(more)
+  })
+
+  it('removes the claim from the rendered document', () => {
+    const { text } = renderDocument({
+      facts: facts(),
+      narrative: { ...narrative(), verified: '已验证的内容。本文件自身 16792 字符。' } as never,
+      version: 'v0.2.0',
+      archivePointer: 'CHANGELOG.md',
+    })
+    expect(text).not.toContain('16792')
+    expect(text).toContain('长度由程序维护')
+  })
+
+  /*
+   * The successor adds files too, so a bare count reads as a promise about the
+   * tree's current size. A live record reported "7 个未提交改动" minutes after
+   * that record had become the eighth file.
+   */
+  it('marks the dirty count as a moment, not a standing fact', () => {
+    const { text } = renderDocument({
+      facts: facts({ git: { branch: 'main', head: 'abcdef1234567890', dirty: true, changedFiles: 7 } }),
+      narrative: narrative() as never,
+      version: 'v0.2.0',
+      archivePointer: 'CHANGELOG.md',
+    })
+    expect(text).toContain('交接时 7 个未提交改动')
+    expect(text).toContain('此后新增的文件不计入')
+  })
+})
+
+describe('the pending-decision channel (§9)', () => {
+  it('renders a decisions section even when the model says nothing', () => {
+    const { text } = renderDocument({
+      facts: facts(),
+      narrative: narrative() as never,
+      version: 'v0.2.0',
+      archivePointer: 'CHANGELOG.md',
+    })
+    const block = text.slice(text.indexOf('## 9. 待用户决策'), text.indexOf('## 10. 历史'))
+    expect(block).toContain('无')
+  })
+
+  /*
+   * The failure this prevents is the one that prompted the section: a session
+   * ended with "A + B or C, which do you want?" and that question died with it.
+   * The successor read §4 as a work order and executed a change nobody approved.
+   */
+  it('detects open proposals and exempts an explicit 无', () => {
+    expect(hasOpenDecisions({ decisions: '改 A 与 B，等用户点头' })).toBe(true)
+    expect(hasOpenDecisions({ decisions: '无' })).toBe(false)
+    expect(hasOpenDecisions({ decisions: '无。' })).toBe(false)
+    expect(hasOpenDecisions({ decisions: '暂无' })).toBe(false)
+    expect(hasOpenDecisions({ decisions: '   ' })).toBe(false)
+    expect(hasOpenDecisions({})).toBe(false)
+    expect(hasOpenDecisions(undefined)).toBe(false)
+  })
+
+  it('tells the successor to ask before acting when proposals are open', () => {
+    const open = renderPointer({
+      documentPath: 'docs/handoff/p/HANDOFF.md',
+      absolutePath: '/w/docs/handoff/p/HANDOFF.md',
+      project: 'p',
+      validUntil: 'x',
+      commands: [],
+      hasPendingDecisions: true,
+    })
+    expect(open).toContain('不是待办事项')
+    expect(open).toContain('必须先逐条问用户')
+    expect(open).toContain('一条都不要执行')
+
+    const closed = renderPointer({
+      documentPath: 'docs/handoff/p/HANDOFF.md',
+      absolutePath: '/w/docs/handoff/p/HANDOFF.md',
+      project: 'p',
+      validUntil: 'x',
+      commands: [],
+    })
+    expect(closed).not.toContain('不是待办事项')
+  })
+})
+
+describe('hasOpenDecisions allows an explanatory empty answer', () => {
+  /*
+   * A writer who has nothing pending still explains why: 「无（上一轮已获批准）」.
+   * Treating that as a proposal would make the warning appear on every document
+   * that fills the section honestly, and a warning that always fires is noise.
+   */
+  it('treats a bracketed explanation of 无 as empty', () => {
+    expect(hasOpenDecisions({ decisions: '无（上一轮的 A/B 已获批准并落地）' })).toBe(false)
+    expect(hasOpenDecisions({ decisions: '无 (nothing pending)' })).toBe(false)
+    expect(hasOpenDecisions({ decisions: '暂无。' })).toBe(false)
+  })
+
+  it('still flags content that follows outside the brackets', () => {
+    expect(hasOpenDecisions({ decisions: '无，但要改 X' })).toBe(true)
+    expect(hasOpenDecisions({ decisions: '无（已批准）\n- 改 Y 待确认' })).toBe(true)
+  })
+})
+
+describe('hasOpenDecisions tolerates a period after the bracketed remark', () => {
+  it('accepts 无（说明）。 — the shape a real document used', () => {
+    expect(
+      hasOpenDecisions({ decisions: '无（上一轮的 A/B/C 与 D 均已获用户批准并落地）。' }),
+    ).toBe(false)
+  })
+})

@@ -1,7 +1,7 @@
 {
   "name": "dsh-handoff-doc",
   "version": "0.2.0",
-  "description": "把长会话交接成一份文件，而不是一条消息：在 Step 边界停下，由会话自身模型写一份带有效期、只有「当前快照」的交接文档（HANDOFF.md），旧版自动归档进 CHANGELOG.md，新会话只收到一条指向该文件的短指令。Hands a long session over as a document, not a message.",
+  "description": "Hands a long session over as a document, not a message: at a step boundary the session writes one HANDOFF.md snapshot with an expiry, the old one is archived, and the new session gets a short pointer.",
   "type": "module",
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
@@ -41,7 +41,7 @@
   "license": "MIT",
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/dsh-host-webserver": ">=0.2.0-rc.2 <0.3.0-0",
+    "@deepseek-ai/dsh-host-webserver": ">=0.2.0-rc.2-0 <0.3.0-0",
     "@deepseek-ai/schemastery": "^3.18.2"
   },
   "devDependencies": {
@@ -70,8 +70,5 @@
         "@deepseek-ai/dsh-client-locale"
       ]
     }
-  },
-  "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.2"
   }
 }

@@ -107,16 +107,50 @@ const VERIFY_SCRIPT_PRIORITY: readonly string[] = [
  * Split out because the **directory name** depends on which sub-project the
  * session worked in, while the facts that reveal it need the slug first. Listing
  * directories is the cheap step that breaks that cycle.
+ *
+ * ## Why a manifest is not the only marker
+ *
+ * Requiring `package.json` used to decide this, and it silently mis-named a
+ * whole handoff: an Electron app in `dsh-recovery/` has `.git`, `README.md`, and
+ * thousands of lines of source but no manifest. It never became a candidate, so
+ * the only directories left were ones the session had merely glanced at, and a
+ * directory named **twice** became "the project" while the real one — 266 of 268
+ * calls — was invisible. The document landed under
+ * `docs/handoff/dsh-connect-volcengine/`, the pointer told the successor to run
+ * checks for two unrelated projects, and nothing warned.
+ *
+ * So a directory counts as a project if it carries any of the markers a project
+ * carries: a manifest, a git repository, or a README. That covers npm, pnpm,
+ * Cargo, Go, Python, plain-script, and Electron layouts without reading a single
+ * file. The manifest is still required to *read commands* — see
+ * {@link readSubprojectCommands} — so a project with no scripts contributes its
+ * name and no wrong advice.
  */
 export async function listSubProjects(files: WorkspaceFiles): Promise<readonly string[]> {
   const names = await files.list('.')
   const found: string[] = []
   for (const name of names) {
     if (name.startsWith('.') || name === 'node_modules' || name === 'dist' || name === 'lib') continue
-    if (await files.exists(`${name}/package.json`)) found.push(name)
+    if (await looksLikeProject(files, name)) found.push(name)
   }
   return found
 }
+
+/**
+ * Markers that make a directory a project rather than a folder.
+ *
+ * `.git` is the strongest: a repository is a unit of work by definition. It is
+ * probed through `HEAD`, which exists in every git directory (empty repositories
+ * included) and — unlike the bare directory — is a file, so it reads the same
+ * through the real filesystem and the in-memory fake. `README.md` is the weakest
+ * marker but still meaningful, and it is what catches layouts with no manifest.
+ */
+async function looksLikeProject(files: WorkspaceFiles, directory: string): Promise<boolean> {
+  if (await files.exists(`${directory}/package.json`)) return true
+  if (await files.exists(`${directory}/.git/HEAD`)) return true
+  return files.exists(`${directory}/README.md`)
+}
+
 
 /**
  * The sub-project the session focused on, or `undefined` when it did not.

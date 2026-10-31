@@ -338,16 +338,37 @@ describe('readProjectFacts — stack for a manifest-less workspace', () => {
  * which one it kept touching.
  */
 describe('listSubProjects / focusFromEvents', () => {
-  it('lists only directories that hold a manifest', async () => {
+  it('lists directories that carry any project marker, not just a manifest', async () => {
     const names = await listSubProjects(
       createMemoryFiles({
         'plugin-a/package.json': '{}',
         'plugin-b/package.json': '{}',
-        'docs/README.md': 'x',
+        'plugin-c/.git/HEAD': 'ref: refs/heads/main',
+        'plugin-d/README.md': '# docs only',
+        'scratch/notes.txt': 'x',
         'node_modules/x/package.json': '{}',
+        'lib/package.json': '{}',
       }),
     )
-    expect([...names].sort()).toEqual(['plugin-a', 'plugin-b'])
+    expect([...names].sort()).toEqual(['plugin-a', 'plugin-b', 'plugin-c', 'plugin-d'])
+  })
+
+  /*
+   * The regression that named a handoff after the wrong project: an Electron app
+   * with `.git` and sources but no manifest was not a candidate, so a directory
+   * the session had named twice became the focus of a 268-call session. The
+   * document was filed under it and the pointer told the successor to verify two
+   * unrelated projects.
+   */
+  it('sees a project that has no manifest at all', async () => {
+    const names = await listSubProjects(
+      createMemoryFiles({
+        'electron-app/.git/HEAD': 'ref: refs/heads/main',
+        'electron-app/app/main.js': 'x',
+        'touched-once/package.json': '{}',
+      }),
+    )
+    expect([...names].sort()).toEqual(['electron-app', 'touched-once'])
   })
 
   it('returns the focus when one project dominates the log', () => {

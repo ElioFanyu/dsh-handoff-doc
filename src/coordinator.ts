@@ -276,6 +276,34 @@ export class Coordinator {
       })
     }
 
+    /*
+     * A session hands off once.
+     *
+     * Observed for real: one session ran `/handoff` twice, ten minutes apart,
+     * with 221 tool calls of work in between. The first successor received a
+     * snapshot of a session that was still working, and the second received a
+     * different one — two live successors for one line of work, each holding a
+     * document that contradicted the other. The first of them was never told.
+     *
+     * The mapping is already kept deliberately after a handoff completes (the
+     * browser may still be following the new session), so refusing here costs
+     * nothing and turns a silently duplicated migration into one clear message.
+     * The successor is the place to continue from; this session is finished.
+     */
+    if (request.kind === 'handoff') {
+      const already = this.newSessions.get(sessionId)
+      if (already !== undefined) {
+        return this.finish(sessionId, {
+          ok: false,
+          phase: 'idle',
+          text:
+            `本会话已经交接过一次，新会话是 ${already}。同一会话不会再次迁移——`
+            + '继续请到那个会话里操作；如果那份交接已经过期，在新会话里重新生成。',
+          error: 'already-handed-off',
+        })
+      }
+    }
+
     const run: Run = { kind: request.kind, phase: 'preparing', cancelRequested: false, boundary: undefined }
     this.runs.set(sessionId, run)
 

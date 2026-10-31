@@ -143,10 +143,58 @@ export function scopesInPlay(scope: readonly WorkScope[]): readonly WorkScope[] 
 }
 
 /**
+ * How much of a session's work the focus must account for to be believable.
+ *
+ * A focus that clears {@link FOCUS_FLOOR} only means "named at least twice",
+ * which is a very low bar on a long session. When the session made two hundred
+ * calls and the leading candidate accounts for two of them, the candidate list
+ * is almost certainly incomplete — that is not a low-signal session, it is a
+ * detector that could not see the real project.
+ *
+ * Ten percent is deliberately generous. A session that spreads cleanly across
+ * several projects still has one of them above a tenth of the calls, and a
+ * single-project session sits near one hundred percent.
+ */
+const PLAUSIBLE_FOCUS_SHARE = 0.1
+
+/**
+ * Is this focus trustworthy enough to name the handoff after?
+ *
+ * The concrete failure this prevents: an Electron app with no `package.json`
+ * was invisible to `listSubProjects`, so a directory the session had named twice
+ * became the focus of a 268-call session. The document was filed under the wrong
+ * project and the pointer told the successor to verify two unrelated ones.
+ *
+ * A suspicious focus is not discarded — it is still the best candidate the
+ * caller has. It is reported so the document and pointer can say "the scope
+ * could not be determined reliably" instead of asserting a wrong answer.
+ */
+export function focusLooksWrong(scope: readonly WorkScope[]): boolean {
+  const focus = scope.find((entry) => entry.focus)
+  if (focus === undefined) return false
+  /*
+   * A short session is exempt: three calls to one project is two out of three,
+   * which is both plausible and typical, and warning there would train the
+   * reader to ignore the warning.
+   */
+  if (focus.totalCalls < 10) return false
+  return focus.calls / focus.totalCalls < PLAUSIBLE_FOCUS_SHARE
+}
+
+/**
  * Does this text name the directory as a path segment?
  *
  * Boundaries matter: `dsh-handoff-doc-old` must not count as
  * `dsh-handoff-doc`, and neither must a mention inside a longer word.
+ *
+ * A leading or trailing dot counts as a boundary. The generated artifacts of
+ * this very plugin are hidden files — `.dsh-handoff-doc.raw.md`,
+ * `.dsh-handoff-doc.log` — and reading the raw output is the documented first
+ * step when a handoff is refused. Treating that read as "did not touch the
+ * project" undercounts real work by one, which is exactly the discrepancy that
+ * made a successor session spend ten tool calls reconciling 54 with 55. A dot
+ * on either side also covers ordinary file references such as
+ * `plugin-a/src/index.ts`, which are evidence of work in that project.
  */
 function namesDirectory(text: string, directory: string): boolean {
   let from = 0
@@ -155,8 +203,8 @@ function namesDirectory(text: string, directory: string): boolean {
     if (at < 0) return false
     const before = at === 0 ? '' : text[at - 1] ?? ''
     const after = text[at + directory.length] ?? ''
-    const startsOk = before === '' || /[\s"'`/=:(,[]/.test(before)
-    const endsOk = after === '' || /[\s"'`/):,\]|;]/.test(after)
+    const startsOk = before === '' || /[\s"'`/=:(,.[]/.test(before)
+    const endsOk = after === '' || /[\s"'`/):,\]|;.]/.test(after)
     if (startsOk && endsOk) return true
     from = at + 1
   }
