@@ -57,6 +57,7 @@ import {
 import { previousDocument, resolveProject, writeHandoff } from './handoff-writer.ts'
 import { focusFromEvents, listSubProjects, readProjectFacts } from './project-facts.ts'
 import { createWorkspaceFiles } from './workspace-fs.ts'
+import { recordFailure } from './diagnostics.ts'
 import { readGitFacts } from './git-facts.ts'
 import {
   deliverBrief,
@@ -391,6 +392,15 @@ export function apply(ctx: Context, config: ConfigShape): void {
       planMode: plan === undefined ? 'unknown' : plan.active ? 'on' : 'off',
     }
   }
+
+  /*
+   * The most recent failure, kept in memory for `GET /last-error`.
+   *
+   * A file is the durable record; this is the copy the user can read without
+   * leaving the UI. It is deliberately small and last-write-wins — a history of
+   * failures belongs in the log file, not in the process.
+   */
+  let lastFailure: HandoffFailure | undefined
 
   const coordinator = new Coordinator({
     latches,
@@ -765,7 +775,18 @@ export function apply(ctx: Context, config: ConfigShape): void {
             })
             return outcome.ok
               ? { kind: 'success', text: outcome.text }
-              : { kind: 'error', text: outcome.text }
+              : {
+                  kind: 'error',
+                  text: await withLogHint({
+                    text: outcome.text,
+                    cwd: safely(() => sessionOf(sessionId)?.header?.cwd),
+                    sessionId,
+                    where: 'handoff',
+                    onRecord: (failure) => {
+                      lastFailure = failure
+                    },
+                  }),
+                }
           } catch (error) {
             /*
              * The text must be non-empty: `dsh-commands` validates a handler's
@@ -776,7 +797,19 @@ export function apply(ctx: Context, config: ConfigShape): void {
              * failure instead of the reason. `new Error()` with no argument has
              * `message === ''`, so an empty message is reachable.
              */
-            return { kind: 'error', text: errorText(error) }
+            return {
+              kind: 'error',
+              text: await withLogHint({
+                text: errorText(error),
+                cwd: safely(() => sessionOf(sessionId)?.header?.cwd),
+                sessionId,
+                where: 'handoff',
+                error,
+                onRecord: (failure) => {
+                  lastFailure = failure
+                },
+              }),
+            }
           }
         },
       })
@@ -854,6 +887,24 @@ export function apply(ctx: Context, config: ConfigShape): void {
 
           if ((req.method ?? 'GET') !== 'POST') {
             sendJson(res, 405, { ok: false, error: '方法不允许' })
+            return
+          }
+
+          /*
+           * The last failure, in full, for copying.
+           *
+           * The conversation surface truncates the red line, so the readable
+           * copy has to come from somewhere else. Reading it over HTTP is
+           * cheaper for the user than finding a log file, and it is the same
+           * text that went to disk — useful when the file could not be written.
+           */
+          if (action === 'last-error' && (req.method ?? 'GET') === 'GET') {
+            const last = lastFailure
+            if (last === undefined) {
+              sendJson(res, 200, { ok: true, error: null })
+              return
+            }
+            sendJson(res, 200, { ok: true, error: last })
             return
           }
 
@@ -1045,6 +1096,60 @@ function safely<T>(read: () => T | undefined): T | undefined {
 export function errorText(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
   return message.trim().length > 0 ? message : '命令执行失败（未提供原因）'
+}
+
+/**
+ * Record a failure to disk and append the log path to the visible message.
+ *
+ * The conversation surface shows one red line, truncated to a fixed width, so
+ * the user reporting a failure can only quote a fragment of it. Writing the
+ * full message plus the stack to a file — and naming that file in the message —
+ * is the difference between "it failed" and something someone can act on.
+ *
+ * The hint is appended, never substituted: the short message stays first so the
+ * common case still reads at a glance. `cwd` is passed in because the session
+ * lookup lives inside `apply()`.
+ */
+async function withLogHint(input: {
+  text: string
+  cwd: string | undefined
+  sessionId: string
+  where: string
+  error?: unknown
+  /** Records the failure for `GET /last-error`, when the plugin is mounted. */
+  onRecord?: (failure: HandoffFailure) => void
+}): Promise<string> {
+  const { text, cwd } = input
+  const at = Date.now()
+  const path = cwd === undefined
+    ? undefined
+    : await recordFailure(cwd, {
+        where: input.where,
+        error: input.error ?? new Error(text),
+        sessionId: input.sessionId,
+      })
+  /*
+   * Recorded even when the file could not be written: a read-only workspace
+   * must not cost the user the only readable copy of the failure.
+   */
+  input.onRecord?.({
+    at,
+    where: input.where,
+    sessionId: input.sessionId,
+    message: text,
+    ...(path === undefined ? {} : { logPath: path }),
+  })
+  if (path === undefined) return text
+  return `${text}\n\n完整错误与堆栈已写入：${path}`
+}
+
+/** One recorded failure, as returned by `GET /last-error`. */
+export interface HandoffFailure {
+  readonly at: number
+  readonly where: string
+  readonly sessionId: string
+  readonly message: string
+  readonly logPath?: string
 }
 
 /**
