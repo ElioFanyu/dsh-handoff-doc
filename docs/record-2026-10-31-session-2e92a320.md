@@ -328,6 +328,47 @@ warnings: ["压缩阈值不低于交接阈值；开启自动交接后会立刻�
 - 未触碰 `dsh-desktop-bridge`、`dsh-obsidian`、`docs/handoff/dsh-connect-volcengine/`。
 - 未读原会话完整事件日志（zstd JSONL）：环境无 `zstd` 可执行文件；要复算 scope 走 `readWorkScope`。
 
+### 2.9 附言触发的后续动作（写完本文档之后）
+
+附言要求「创建文档保存…所有操作…然后提交 GitHub」，所以写完之后继续做了提交与推送，
+并按「HEAD 一变就失效」的规则重写了交接文档。按时间顺序：
+
+1. **先问范围再动手**：仓库里除本文档外，还有 11 个已改未提交的源码/测试文件（`638+/40−`）。
+   提交范围会直接改变推上去的内容，**没有猜**，用 `ask_user_question` 问了三选一。
+   用户选择 **「文档 + 那 11 个改动一起提交」**。
+2. **`git add -A` → 复核 staged**：13 项（11 改 + 2 新增文档），合计 `1313+/40−`，
+   `lib/`、`node_modules/` 没有被带进来。
+3. **拆成两笔提交**（`git reset` 后分组 `add`）：
+   - `96709ec fix: 收紧范围判定与解析健壮性，补齐 §9 待决策通道` —— `package.json` + `src/` + `tests/`
+   - `3e74e96 docs: 补记两轮会话交接的过程记录` —— `docs/`（两份手写记录，含此前从未入库的 takeover 记录）
+   理由：源码改动与文档记录是两件事，混一笔以后不好回滚、也不好 blame。
+4. **提交后复跑 `npm run check`** → 仍 23 文件 / 453 用例、`Build complete` ×2、exit 0。
+   即「提交进去的确实是过检查的版本」。
+5. **推送**：`GIT_SSH_COMMAND="ssh -o BatchMode=yes" git push origin main` → `89e595e..3e74e96  main -> main`。
+6. **核对远端**：`git ls-remote origin main` = `3e74e96b645338e05206b46732bfe208265e1659`，与本地 `HEAD` 一致。
+7. **重写交接文档**：HEAD 从 `89e595e7` 变 `3e74e96b`，按交接文件自己的有效期规则（「HEAD 变化即失效，
+   必须整份重写，不得追加」）已失效。问过用户，用户选「现在就重写」，于是**整份重写**（非追加）：
+   - 版本行改 `v0.2.0 · 3e74e96b`；§3 删掉「12 个未提交改动」这条卡点（现已干净）；
+     §8 把「未提交改动是否可推」换成已推送证据，并记录字符数漂移这个坑。
+   - 新增两条实操坑：`/config` 字段在 `settings` 子对象下；不能拿 curl 的 exit code 判端口可用。
+   - 新增「两个 `docs/` 是不同目录」这条事实。
+8. **验证重写后的文件本身**：按 §4 要求在 `tests/manual/` 写临时探针跑 `parseDoc` + `missingRequired`
+   → **11/11 节全解析、`missingRequired` 为空、19396 字符 < 24000**。探针用完即删，
+   删后复跑 vitest 仍 23 / 453，基线未被污染。
+
+**本轮踩到的坑（都记下来，别再踩）**：
+
+- 探针第一版写 `Object.keys(DOC_SECTIONS)`，结果 `sections=0/11` 而 `missing=none`——
+  `DOC_SECTIONS` 是**数组**不是对象，要用 `DOC_SECTIONS.map(s => s.key)`。
+  `sections=0` 与 `missing=none` 同时出现，就是「两边都没对上却互相掩盖」的错；
+  **看到 `0/N` 先怀疑探针本身，别急着怀疑文档。**
+- 探针传相对路径时 `vite-node` 把 cwd 解析成 `D:\Workspace\docs\…`（少了 `DeepSeek Harness` 一层），
+  报 `ENOENT`。**传绝对路径。**
+- `git check-ignore -v docs/handoff` 返回 1 曾被误读成「被忽略」，实际是「路径不在仓库里」。
+  两者结论完全不同，要靠 `git ls-files` 交叉确认。
+- `for` 循环探端口时最后一条是 `000`，整条命令 exit 7（curl 连接失败码），
+  看着像脚本挂了，其实是预期结果。
+
 ---
 
 ## 三、本轮新增的结论
@@ -340,6 +381,8 @@ warnings: ["压缩阈值不低于交接阈值；开启自动交接后会立刻�
    不影响可用性，也不该触发重写。
 6. **两个 `docs/` 是不同目录**：仓库内的 `dsh-handoff-doc/docs/` 才归版本控制；
    工作区根的 `docs/handoff/` 在仓库之外，交接产物从未也无需入库。
+7. **已提交并推送**：两笔提交 `96709ec`（源码）+ `3e74e96`（文档），远端 `main` 已推进到 `3e74e96b`，
+   工作区干净。交接文档因 HEAD 变化已按规则整份重写并复验通过（19396 字符 / 11 节 / 零缺失）。
 
 ## 四、仍然悬着的事（与快照一致，本轮未推进）
 
