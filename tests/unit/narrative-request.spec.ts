@@ -82,7 +82,7 @@ describe('requestNarrative (llm.stream)', () => {
     expect(message).toContain('4096 token 上限截断')
     expect(message).toContain('4. 下一步 + 验证映射')
     // It must name the setting to raise, not just the symptom.
-    expect(message).toContain('摘要模型输出上限')
+    expect(message).toContain('文档输出上限')
   })
 
   it('reports a model that simply skipped a section as a different failure', async () => {

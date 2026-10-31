@@ -1100,7 +1100,7 @@ export async function requestNarrative(
     if (truncated) {
       throw new Error(
         `模型输出被 ${maxTokens} token 上限截断，后面的小节没写完（缺：${names}）。`
-        + `请把「摘要模型输出上限」调到 ${Math.ceil((maxTokens * 2) / 1000) * 1000} 以上，或把「交接文档上限」调小，然后 /handoff retry。`
+        + `请把设置里的「文档输出上限」调到 ${Math.ceil((maxTokens * 2) / 1000) * 1000} 以上，或把「交接文档上限（字符）」调小，然后 /handoff retry。`
       )
     }
     throw new Error(`模型没有写完必需小节（缺：${names}）。已放弃本次交接，可 /handoff retry。`)
