@@ -232,6 +232,16 @@ export interface DocFacts {
   readonly git?: GitFacts
   readonly sourceSessionId: string
   readonly createdAt: number
+  /**
+   * Sessions this workspace has handed off through, oldest first.
+   *
+   * Observed need: three handoffs from one session left a successor trying to
+   * reconstruct the chain from `command/done` text and `HANDOFF.md` headers, and
+   * it got the chain wrong — inventing a first hop that never happened and
+   * attributing a record file to the wrong handoff. The chain is a fact the
+   * program knows; making the successor guess it was the defect.
+   */
+  readonly chain?: readonly string[]
   /** Unanswered question or trailing assistant message, program-detected. */
   readonly pendingInput?: PendingInputFacts
 }
@@ -1085,8 +1095,26 @@ export function factLines(facts: DocFacts): readonly string[] {
       + `权限=${permission}，Plan=${facts.planMode === 'unknown' ? '未知' : facts.planMode === 'on' ? '开启' : '关闭'}，`
       + `已完成 turn=${facts.turnCount}，交接时上下文占用=${occupancy}`,
     `- 上一段会话：\`${facts.sourceSessionId}\`，生成于 ${new Date(facts.createdAt).toISOString()}`,
+    ...chainLine(facts),
     ...(facts.pendingInput === undefined ? [] : [pendingLine(facts.pendingInput)]),
   ]
+}
+
+/**
+ * The handoff chain, as one program-read line.
+ *
+ * Rendered from the durable record rather than left to the writer: a successor
+ * that reconstructs the chain from headers and `command/done` text has already
+ * been observed getting it wrong — inventing a first hop and crediting a record
+ * file to the wrong handoff. One line removes the guesswork.
+ *
+ * Omitted entirely when there is no chain, so a workspace that has handed off
+ * once is not told about a history it does not have.
+ */
+function chainLine(facts: DocFacts): readonly string[] {
+  const chain = facts.chain ?? []
+  if (chain.length === 0) return []
+  return [`- 交接链（程序读取，勿改写）：${chain.map((id) => `\`${id}\``).join(' → ')}`]
 }
 
 /**

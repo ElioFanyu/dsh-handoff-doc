@@ -96,6 +96,25 @@ export interface CoordinatorDeps {
    * degradation on a host that cannot stop a session.
    */
   readonly retire?: (sessionId: string, newSessionId: string | undefined) => Promise<void> | void
+  /**
+   * The session this one was already handed off to, read from durable storage.
+   *
+   * The in-memory `newSessions` map cannot answer this after a restart, and a
+   * restart between two `/handoff` calls is exactly when the duplicate happens.
+   * Absent means "this deployment has no place to keep the record", in which
+   * case the guard degrades to its old in-memory behaviour rather than failing:
+   * refusing every handoff because the audit file is missing would be worse
+   * than the duplicate it is trying to prevent.
+   */
+  readonly handoffTargetOf?: (sessionId: string) => Promise<string | undefined>
+  /**
+   * Record a completed handoff so it survives a restart.
+   *
+   * Called after the new session exists. Failures are the implementation's to
+   * swallow: the handoff has succeeded by then and the in-memory map still
+   * covers this process.
+   */
+  readonly recordHandoff?: (link: { readonly from: string; readonly to: string }) => Promise<void> | void
   readonly now?: () => number
   readonly log?: (message: string) => void
 }
@@ -289,9 +308,14 @@ export class Coordinator {
      * browser may still be following the new session), so refusing here costs
      * nothing and turns a silently duplicated migration into one clear message.
      * The successor is the place to continue from; this session is finished.
+     *
+     * The in-memory map alone was not enough: a restart clears it, and a session
+     * that had handed off could hand off again — observed three times in one
+     * afternoon. The chain file on disk is the part that survives, so both are
+     * consulted and the disk answer is authoritative when they disagree.
      */
     if (request.kind === 'handoff') {
-      const already = this.newSessions.get(sessionId)
+      const already = this.newSessions.get(sessionId) ?? (await this.persistedTarget(sessionId))
       if (already !== undefined) {
         return this.finish(sessionId, {
           ok: false,
@@ -426,6 +450,17 @@ export class Coordinator {
     // was. Retiring first would mean a delivery failure strands the task in a
     // session that is already standing down.
     run.phase = 'transferring'
+
+    /*
+     * Record the link before the session is retired, so the "this session is
+     * finished" fact outlives the process. A restart between two `/handoff`
+     * calls is what defeated the in-memory guard; this line is the part that
+     * survives it. Written after delivery so a failed migration never claims a
+     * successor that does not exist.
+     */
+    if (migrated.newSessionId !== undefined) {
+      await this.rememberHandoff(sessionId, migrated.newSessionId)
+    }
 
     /*
      * Move any human input that arrived mid-flight to the session that now owns
@@ -660,6 +695,33 @@ export class Coordinator {
       return await this.activityCheck(sessionId)
     } catch {
       return true
+    }
+  }
+
+  /**
+   * Ask durable storage whether this session already handed off.
+   *
+   * Tolerant on purpose: an unreadable chain file must not block a handoff that
+   * is otherwise fine. The cost of a missed refusal is one duplicate; the cost
+   * of refusing because a file could not be read is that handoff stops working
+   * entirely.
+   */
+  private async persistedTarget(sessionId: string): Promise<string | undefined> {
+    if (this.deps.handoffTargetOf === undefined) return undefined
+    try {
+      return await this.deps.handoffTargetOf(sessionId)
+    } catch {
+      return undefined
+    }
+  }
+
+  /** Write the link so a restart cannot resurrect a finished session. */
+  private async rememberHandoff(from: string, to: string): Promise<void> {
+    if (this.deps.recordHandoff === undefined) return
+    try {
+      await this.deps.recordHandoff({ from, to })
+    } catch {
+      // See the dep's comment: the handoff already succeeded.
     }
   }
 

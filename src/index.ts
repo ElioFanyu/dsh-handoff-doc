@@ -57,6 +57,7 @@ import {
 import { previousDocument, resolveProject, writeHandoff } from './handoff-writer.ts'
 import { focusFromEvents, listSubProjects, readProjectFacts } from './project-facts.ts'
 import { createWorkspaceFiles } from './workspace-fs.ts'
+import { appendChainLink, chainSessions, handoffTargetOf, readChain } from './chain.ts'
 import { dumpRawOutput, recordFailure } from './diagnostics.ts'
 import { readGitFacts } from './git-facts.ts'
 import {
@@ -283,6 +284,21 @@ export function apply(ctx: Context, config: ConfigShape): void {
     const projectFactsWithGit = { ...projectFacts, git }
 
     const createdAt = Date.now()
+    /*
+     * The chain, read from the durable record and cap-ended with this session.
+     *
+     * This session is necessarily the newest link: the document is being written
+     * because it is handing off now. Appending it here rather than waiting for
+     * the write keeps the line true at the moment the successor reads it, even
+     * if recording the link later fails.
+     */
+    const recordedChain = await readChain(cwd).catch(() => [])
+    const chainForDoc =
+      recordedChain.length === 0
+        ? undefined
+        : [...chainSessions(recordedChain), agent.id].filter(
+            (id, index, all) => all.indexOf(id) === index,
+          )
     const docFacts: DocFacts = {
       project,
       cwd,
@@ -303,6 +319,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
       sourceSessionId: agent.id,
       createdAt,
       ...(pendingInput === undefined ? {} : { pendingInput: toDocPending(pendingInput) }),
+      ...(chainForDoc === undefined ? {} : { chain: chainForDoc }),
     }
 
     const root = live.handoffDir.trim().length === 0 ? 'docs/handoff' : live.handoffDir
@@ -403,6 +420,16 @@ export function apply(ctx: Context, config: ConfigShape): void {
    */
   let lastFailure: HandoffFailure | undefined
 
+  /** A session's workspace root, or `undefined` when it cannot be read. */
+  const cwdOf = (sessionId: string): string | undefined => {
+    try {
+      const cwd = sessionOf(sessionId)?.header?.cwd
+      return typeof cwd === 'string' && cwd.length > 0 ? cwd : undefined
+    } catch {
+      return undefined
+    }
+  }
+
   const coordinator = new Coordinator({
     latches,
     summarize,
@@ -482,6 +509,24 @@ export function apply(ctx: Context, config: ConfigShape): void {
     },
     now: () => Date.now(),
     log,
+    /*
+     * The durable half of the duplicate-handoff guard.
+     *
+     * The in-memory map dies with the process, and a restart between two
+     * `/handoff` calls is exactly when a session was observed handing off again.
+     * Both reads are best-effort: a workspace we cannot read is treated as "no
+     * record", because blocking a legitimate handoff is worse than the duplicate
+     * this is trying to stop.
+     */
+    handoffTargetOf: async (sessionId) => {
+      const root = cwdOf(sessionId)
+      return root === undefined ? undefined : handoffTargetOf(root, sessionId)
+    },
+    recordHandoff: async ({ from, to }) => {
+      const root = cwdOf(from)
+      if (root === undefined) return
+      await appendChainLink(root, { from, to, at: new Date().toISOString() })
+    },
   })
 
   coordinator.activityCheck = (sessionId: string) => {

@@ -1153,3 +1153,32 @@ describe('hasOpenDecisions tolerates a period after the bracketed remark', () =>
     ).toBe(false)
   })
 })
+
+describe('the handoff chain in §2', () => {
+  /*
+   * A successor once reconstructed the chain from headers and `command/done`
+   * text and got it wrong — inventing a first hop that never happened and
+   * crediting a record file to the wrong handoff. The chain is a fact the
+   * program knows, so guessing it was the defect.
+   */
+  it('renders the chain when the record has one', () => {
+    const { text } = renderDocument({
+      facts: facts({ chain: ['session-a', 'session-b', 'session-c'] }),
+      narrative: narrative() as never,
+      version: 'v0.2.0',
+      archivePointer: 'CHANGELOG.md',
+    })
+    expect(text).toContain('交接链')
+    expect(text).toContain('`session-a` → `session-b` → `session-c`')
+  })
+
+  it('omits the line entirely when there is no chain', () => {
+    const { text } = renderDocument({
+      facts: facts(),
+      narrative: narrative() as never,
+      version: 'v0.2.0',
+      archivePointer: 'CHANGELOG.md',
+    })
+    expect(text).not.toContain('交接链')
+  })
+})

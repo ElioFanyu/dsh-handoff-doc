@@ -746,3 +746,80 @@ describe('Coordinator — captured input is discarded when the task does not mov
     expect(result.phase).toBe('failed')
   })
 })
+
+describe('the duplicate-handoff guard survives a restart', () => {
+  /*
+   * The in-memory map dies with the process, and a restart between two
+   * `/handoff` calls is exactly when a session was observed handing off again —
+   * three times in one afternoon. The durable record is what makes the refusal
+   * hold across that boundary.
+   */
+  it('refuses when only durable storage remembers the handoff', async () => {
+    const recorded: { from: string; to: string }[] = []
+    const coordinator = new Coordinator(
+      deps({
+        // Fresh process: nothing in memory, but the chain file says otherwise.
+        handoffTargetOf: async (sessionId) =>
+          sessionId === 's1' ? 'session-from-disk' : undefined,
+        recordHandoff: async (link) => {
+          recorded.push(link)
+        },
+      }),
+    )
+
+    const result = await coordinator.run(handoff(idleAgent()))
+    expect(result.ok).toBe(false)
+    expect(result.error).toBe('already-handed-off')
+    expect(result.text).toContain('session-from-disk')
+    // A refused handoff must not write a second link.
+    expect(recorded).toEqual([])
+  })
+
+  it('records the link after a successful handoff so the next process sees it', async () => {
+    const recorded: { from: string; to: string }[] = []
+    const coordinator = new Coordinator(
+      deps({
+        handoffTargetOf: async () => undefined,
+        recordHandoff: async (link) => {
+          recorded.push(link)
+        },
+      }),
+    )
+
+    const result = await coordinator.run(handoff(idleAgent()))
+    expect(result.ok).toBe(true)
+    expect(recorded).toEqual([{ from: 's1', to: 'new-1' }])
+  })
+
+  /*
+   * A missing or unreadable chain file must degrade to the old behaviour, not
+   * block every handoff: the guard exists to prevent a duplicate, and refusing
+   * all handoffs would be a far worse failure than the one it prevents.
+   */
+  it('still allows a handoff when durable storage cannot be read', async () => {
+    const coordinator = new Coordinator(
+      deps({
+        handoffTargetOf: async () => {
+          throw new Error('disk on fire')
+        },
+      }),
+    )
+    const result = await coordinator.run(handoff(idleAgent()))
+    expect(result.ok).toBe(true)
+  })
+
+  it('does not add a durable record when the migration failed', async () => {
+    const recorded: { from: string; to: string }[] = []
+    const coordinator = new Coordinator(
+      deps({
+        migrate: async () => ({ ok: false, phase: 'failed', text: 'no session' }),
+        recordHandoff: async (link) => {
+          recorded.push(link)
+        },
+      }),
+    )
+    const result = await coordinator.run(handoff(idleAgent()))
+    expect(result.ok).toBe(false)
+    expect(recorded).toEqual([])
+  })
+})

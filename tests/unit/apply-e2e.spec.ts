@@ -186,8 +186,14 @@ describe('apply — the document path, end to end', () => {
     expect(result.kind).toBe('success')
 
     // The project folder comes from the temp directory's own name.
-    const dir = (await import('node:fs/promises')).readdir(join(root, 'docs/handoff'))
-    const project = (await dir)[0]!
+    /*
+     * `docs/handoff/` also holds this plugin's own dot-files — the failure log,
+     * the rejected model output, and now the handoff chain. They are not project
+     * folders, so the listing is filtered rather than taking the first entry:
+     * taking `[0]` picked the chain file and produced a path no one wrote to.
+     */
+    const entries = await (await import('node:fs/promises')).readdir(join(root, 'docs/handoff'))
+    const project = entries.find((entry) => !entry.startsWith('.'))!
     const written = await readFile(join(root, 'docs/handoff', project, 'HANDOFF.md'), 'utf8')
 
     expect(written).toContain('# 交接 ——')
