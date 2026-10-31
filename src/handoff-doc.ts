@@ -1097,11 +1097,41 @@ export function renderPointer(input: {
   project: string
   validUntil: string
   commands: readonly ProjectCommand[]
+  /**
+   * Which sub-projects this session actually worked in.
+   *
+   * Without it the pointer is silent about scope, and the successor is handed a
+   * bare instruction like `推送 GitHub` with a whole workspace in front of it.
+   * It then scans every repository, finds the one with an unpushed commit, and
+   * concludes that is what the instruction meant — a real misread observed in
+   * this very workspace, where the session had only touched `dsh-handoff-doc`.
+   */
+  scope?: readonly WorkScope[] | undefined
   pendingInput?: PendingInputFacts | undefined
   /** The human's own instruction for the successor; never part of the document. */
   instruction?: string | undefined
 }): string {
-  const primary = input.commands.filter((entry) => isVerification(entry.command)).slice(0, 2)
+  const focus = input.scope?.find((entry) => entry.focus)
+  /*
+   * The pointer's own "run this first" list obeys the same rule as §0: the
+   * project this session worked in comes first, and a project it only glanced
+   * at does not get a slot. Otherwise the successor reads two commands at the
+   * top of the message and treats both as its business.
+   */
+  const inPlay = scopesInPlay(input.scope ?? [])
+  const inPlayPrefixes = inPlay.map((entry) => `cd ${entry.directory} && `)
+  const ordered =
+    focus === undefined
+      ? input.commands
+      : [
+          ...input.commands.filter((entry) => entry.command.startsWith(`cd ${focus.directory} && `)),
+          ...input.commands.filter(
+            (entry) =>
+              !entry.command.startsWith(`cd ${focus.directory} && `) &&
+              inPlayPrefixes.some((prefix) => entry.command.startsWith(prefix)),
+          ),
+        ]
+  const primary = ordered.filter((entry) => isVerification(entry.command)).slice(0, 2)
   const lines: string[] = [
     `# 交接：${input.project}`,
     '',
@@ -1110,6 +1140,19 @@ export function renderPointer(input: {
     `- 文档：\`${input.documentPath}\``,
     `- 绝对路径：\`${input.absolutePath}\``,
     `- 有效期：${input.validUntil}`,
+    ...(focus === undefined
+      ? []
+      : [
+          `- 本会话的工作范围：\`${focus.directory}\`（${focus.calls}/${focus.totalCalls} 次工具调用）`,
+          `  未涉及的项目：${
+            input.scope?.filter((entry) => !entry.focus).length === 0
+              ? '（无）'
+              : input.scope!
+                  .filter((entry) => !entry.focus)
+                  .map((entry) => `\`${entry.directory}\``)
+                  .join('、')
+          }`,
+        ]),
     '',
     '**读取顺序（不要整份通读）：**',
     '',
@@ -1164,6 +1207,28 @@ export function renderPointer(input: {
       input.instruction.trim(),
       '',
       '若这段附言与 §4 冲突，以附言为准，并在动工前一句话说明冲突在哪。',
+      /*
+       * Scope the instruction, because prose like `推送 GitHub` does not name a
+       * repository.
+       *
+       * The successor stands in a workspace that may hold a dozen independent
+       * repositories, several with unpushed commits of their own. Left
+       * unqualified, "push to GitHub" invites it to enumerate them and pick one
+       * — which is how an instruction about this session's project turns into a
+       * question about an unrelated repository. The session's own scope answers
+       * it without guessing.
+       */
+      ...(focus === undefined
+        ? [
+            '',
+            '**关于附言的范围：** 本会话没有留下明确的工作范围，所以附言里未点名的对象需要先向用户确认，不要自行推断。',
+          ]
+        : [
+            '',
+            `**关于附言的范围：** 附言里未点名的对象，默认指本会话的工作范围 \`${focus.directory}\`。` +
+              `工作区里的其它仓库即使有未提交/未推送的内容，也不属于这次交接，不要动它们；` +
+              `确实需要处理别的仓库时，先向用户确认。`,
+          ]),
     )
   }
 

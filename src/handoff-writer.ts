@@ -183,6 +183,7 @@ export async function writeHandoff(input: WriteHandoffInput): Promise<WriteHando
     project: input.project,
     validUntil: validityOf(input.facts),
     commands: input.facts.commands,
+    ...(input.facts.scope === undefined ? {} : { scope: input.facts.scope }),
     ...(input.facts.pendingInput === undefined ? {} : { pendingInput: input.facts.pendingInput }),
     ...(input.instruction === undefined ? {} : { instruction: input.instruction }),
   })

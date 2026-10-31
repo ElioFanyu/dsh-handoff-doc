@@ -684,6 +684,63 @@ describe('renderPointer', () => {
     expect(message).toContain('要不要改名？')
     expect(message).toContain('先向用户确认，不要自行决定')
   })
+
+  /*
+   * The bug this prevents, observed for real: a session that had only ever
+   * touched `dsh-handoff-doc` handed its successor the bare instruction
+   * `推送 GitHub`. The successor scanned the workspace, found a *different*
+   * repository with an unpushed commit, and asked the user whether to push that
+   * one. Prose does not name a repository; the session's scope does.
+   */
+  it('states the session scope so an unqualified instruction is not misread', () => {
+    const message = renderPointer({
+      documentPath: 'docs/handoff/w/HANDOFF.md',
+      absolutePath: '/w/docs/handoff/w/HANDOFF.md',
+      project: 'w',
+      validUntil: 'x',
+      commands: [{ command: 'cd plugin-a && npm run check', origin: 'plugin-a/package.json', proves: '通过' }],
+      scope: [
+        { directory: 'plugin-a', calls: 91, totalCalls: 114, focus: true },
+        { directory: 'plugin-b', calls: 2, totalCalls: 114, focus: false },
+      ],
+      instruction: '推送 GitHub',
+    })
+    expect(message).toContain('本会话的工作范围：`plugin-a`')
+    expect(message).toContain('未涉及的项目：`plugin-b`')
+    expect(message).toContain('默认指本会话的工作范围 `plugin-a`')
+    expect(message).toContain('不属于这次交接，不要动它们')
+  })
+
+  /*
+   * With no scope there is nothing to infer from, so the pointer must forbid
+   * guessing rather than let the successor pick the most convenient repository.
+   */
+  it('forbids inference when the session left no scope', () => {
+    const message = renderPointer({
+      documentPath: 'docs/handoff/w/HANDOFF.md',
+      absolutePath: '/w/docs/handoff/w/HANDOFF.md',
+      project: 'w',
+      validUntil: 'x',
+      commands: [],
+      instruction: '推送 GitHub',
+    })
+    expect(message).toContain('需要先向用户确认，不要自行推断')
+    expect(message).not.toContain('默认指本会话的工作范围')
+  })
+
+  it('stays short even with a scope and an instruction', () => {
+    const message = renderPointer({
+      documentPath: 'docs/handoff/w/HANDOFF.md',
+      absolutePath: '/w/docs/handoff/w/HANDOFF.md',
+      project: 'w',
+      validUntil: 'x',
+      commands: [{ command: 'cd a && npm run check', origin: 'a/package.json', proves: '通过' }],
+      scope: [{ directory: 'a', calls: 9, totalCalls: 10, focus: true }],
+      instruction: '推送 GitHub',
+    })
+    // The pointer's whole value is being cheap to read on every turn.
+    expect(message.length).toBeLessThan(1_900)
+  })
 })
 
 describe('renderTranscript', () => {
