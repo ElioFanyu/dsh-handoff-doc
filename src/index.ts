@@ -55,7 +55,7 @@ import {
   type DocNarrative,
 } from './handoff-doc.ts'
 import { previousDocument, resolveProject, writeHandoff } from './handoff-writer.ts'
-import { readProjectFacts } from './project-facts.ts'
+import { focusFromEvents, listSubProjects, readProjectFacts } from './project-facts.ts'
 import { createWorkspaceFiles } from './workspace-fs.ts'
 import { readGitFacts } from './git-facts.ts'
 import {
@@ -250,7 +250,16 @@ export function apply(ctx: Context, config: ConfigShape): void {
       throw new Error('原会话没有工作目录，无法确定交接文档的位置')
     }
     const files = createWorkspaceFiles(cwd)
-    const project = resolveProject(live.handoffProjectFolder, cwd)
+    /*
+     * The folder is named after the project the session worked in, not after the
+     * workspace folder it happened to sit in.
+     *
+     * The scope must be computed first because it decides the output path.
+     * Listing sub-projects is the cheap step; only their names are needed to see
+     * which one the log kept naming.
+     */
+    const focus = focusFromEvents(events, await listSubProjects(files))
+    const project = resolveProject(live.handoffProjectFolder, cwd, focus?.directory)
     /*
      * Project facts come first, because reading them is what decides which
      * directory the git facts should describe.
@@ -587,7 +596,13 @@ export function apply(ctx: Context, config: ConfigShape): void {
       return '## 交接文档\n- 无法确定当前会话的工作目录，因此无法定位交接文档。'
     }
     const files = createWorkspaceFiles(cwd)
-    const project = resolveProject(live.handoffProjectFolder, cwd)
+    /*
+     * Same folder rule as the writer, or `where` would report a path the
+     * handoff never wrote to. The session's own log supplies the focus; a
+     * session whose log is unreadable falls back to the workspace name.
+     */
+    const focus = focusFromEvents(safely(() => sessionEvents(session)), await listSubProjects(files))
+    const project = resolveProject(live.handoffProjectFolder, cwd, focus?.directory)
     const root = live.handoffDir.trim().length === 0 ? 'docs/handoff' : live.handoffDir
     const paths = docPaths(root, project)
 

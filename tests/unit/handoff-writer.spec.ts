@@ -219,4 +219,25 @@ describe('resolveProject', () => {
   it('falls back to the workspace when the pin is blank', () => {
     expect(resolveProject('   ', 'D:/x/y')).toBe('y')
   })
+
+  /*
+   * The folder name is the only thing telling a reader which project a handoff
+   * belongs to. A workspace of many repositories has a name that answers nothing
+   * — `deepseek-harness` is a container — so the sub-project the session worked
+   * in must win over it.
+   */
+  it('names the folder after the project the session worked in', () => {
+    expect(resolveProject('', 'D:/Workspace/DeepSeek Harness', 'dsh-handoff-doc')).toBe(
+      'dsh-handoff-doc',
+    )
+  })
+
+  it('lets an explicit pin beat the focus, because a pin is a decision', () => {
+    expect(resolveProject('my-app', 'D:/w/hub', 'plugin-a')).toBe('my-app')
+  })
+
+  it('ignores a blank focus instead of writing a nameless folder', () => {
+    expect(resolveProject('', 'D:/w/hub', '   ')).toBe('hub')
+    expect(resolveProject('', 'D:/w/hub', undefined)).toBe('hub')
+  })
 })

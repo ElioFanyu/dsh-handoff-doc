@@ -101,6 +101,38 @@ const VERIFY_SCRIPT_PRIORITY: readonly string[] = [
  * the successor is told to go and invent one. The fallback reads one level down
  * and names each sub-project's commands, which is what a human would have done.
  */
+/**
+ * Sub-project directories in this workspace, before any command is read.
+ *
+ * Split out because the **directory name** depends on which sub-project the
+ * session worked in, while the facts that reveal it need the slug first. Listing
+ * directories is the cheap step that breaks that cycle.
+ */
+export async function listSubProjects(files: WorkspaceFiles): Promise<readonly string[]> {
+  const names = await files.list('.')
+  const found: string[] = []
+  for (const name of names) {
+    if (name.startsWith('.') || name === 'node_modules' || name === 'dist' || name === 'lib') continue
+    if (await files.exists(`${name}/package.json`)) found.push(name)
+  }
+  return found
+}
+
+/**
+ * The sub-project the session focused on, or `undefined` when it did not.
+ *
+ * Used to name the handoff directory after the project rather than after the
+ * workspace folder: `docs/handoff/dsh-handoff-doc/` says what the handoff is
+ * about, while `docs/handoff/deepseek-harness/` names the container the session
+ * happened to sit in.
+ */
+export function focusFromEvents(
+  events: readonly SessionEventLike[] | undefined,
+  candidates: readonly string[],
+): WorkScope | undefined {
+  return readWorkScope(events, candidates).find((entry) => entry.focus)
+}
+
 export async function readProjectFacts(input: {
   files: WorkspaceFiles
   cwd: string | undefined
@@ -217,11 +249,9 @@ async function readSubprojectCommands(
   events?: readonly SessionEventLike[] | undefined,
 ): Promise<readonly ProjectCommand[]> {
   if (SUBPROJECT_SCAN_DEPTH < 1) return []
-  const names = await files.list('.')
   const found: ProjectCommand[] = []
 
-  for (const name of names) {
-    if (name.startsWith('.') || name === 'node_modules' || name === 'dist' || name === 'lib') continue
+  for (const name of await listSubProjects(files)) {
     const manifest = await readManifestIn(files, name)
     if (manifest === undefined) continue
     const scripts = await readScriptsIn(files, manifest, name)

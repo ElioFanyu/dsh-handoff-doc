@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { readProjectFacts, stackFromDeps } from '@src/project-facts.ts'
+import { focusFromEvents, listSubProjects, readProjectFacts, stackFromDeps } from '@src/project-facts.ts'
 import { createMemoryFiles } from '@src/workspace-fs.ts'
 
 const MANIFEST = JSON.stringify({
@@ -329,5 +329,38 @@ describe('readProjectFacts — stack for a manifest-less workspace', () => {
   it('says nothing when there is genuinely nothing to detect', async () => {
     const facts = await readProjectFacts({ files: createMemoryFiles({}), cwd: '/w', slug: 'w' })
     expect(facts.stack).toEqual([])
+  })
+})
+
+/*
+ * Naming the output folder needs the focus before the facts are read, so these
+ * two are what a caller reaches for first: list the candidates, ask the log
+ * which one it kept touching.
+ */
+describe('listSubProjects / focusFromEvents', () => {
+  it('lists only directories that hold a manifest', async () => {
+    const names = await listSubProjects(
+      createMemoryFiles({
+        'plugin-a/package.json': '{}',
+        'plugin-b/package.json': '{}',
+        'docs/README.md': 'x',
+        'node_modules/x/package.json': '{}',
+      }),
+    )
+    expect([...names].sort()).toEqual(['plugin-a', 'plugin-b'])
+  })
+
+  it('returns the focus when one project dominates the log', () => {
+    const events = [
+      { type: 'tool/call', seq: 1, data: { name: 'ops_bash', arguments: '{"command":"cd plugin-b && npm test"}' } },
+      { type: 'tool/call', seq: 2, data: { name: 'ops_bash', arguments: '{"command":"ls plugin-b/src"}' } },
+      { type: 'tool/call', seq: 3, data: { name: 'ops_bash', arguments: '{"command":"ls plugin-a"}' } },
+    ]
+    expect(focusFromEvents(events, ['plugin-a', 'plugin-b'])?.directory).toBe('plugin-b')
+  })
+
+  it('returns nothing when no project was worked in, so the caller keeps the workspace name', () => {
+    expect(focusFromEvents(undefined, ['plugin-a'])).toBeUndefined()
+    expect(focusFromEvents([], ['plugin-a'])).toBeUndefined()
   })
 })

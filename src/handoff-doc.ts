@@ -391,13 +391,27 @@ export function buildDocPrompt(input: {
     '## 硬性规则（违反则整份作废，重新生成）',
     '',
     '1. **只写现在仍然成立的事实。** 判断标准：这句话今天是否为真。凡是「之前是…后来改成…」「我们讨论过…」「第一版曾经…」一律删掉。',
-    '2. **本文件是快照，不是日志。** 历史不进这里，§9 只写一行指向 CHANGELOG.md 的指针。',
-    '3. **不写行号。** 行号第二天就过期。写职责，不写位置。',
-    '4. **不编造验证结果。** 只有你真的执行过、并看到输出的，才能写进 §8 的「已验证」；否则写进「未验证」并给出验证方法。',
-    '5. **不要用「未知」糊弄。** 对话记录里有线索就必须写出具体内容；只有记录里确实没有时，才写「未知」并说明缺什么。',
-    '6. **不写密钥、令牌、密码、连接串的值。** 需要引用时只写键名。',
-    '7. **§0 必须能直接照做。** 写命令和预期输出，不写「建议先检查一下环境」。',
-    '8. **总长控制在约 ' + Math.round(input.budgetChars / 1000) + ' 千字符以内。** 超了会被程序截断，截断发生在你最需要保留的段落上。',
+    '2. **本文件是快照，不是日志，每次交接都整份重写。** 历史不进这里，§9 只写一行指向 CHANGELOG.md 的指针。',
+    /*
+     * The rule the model reliably ignores without being told twice.
+     *
+     * Writing "done" items feels like progress, and it is the single thing that
+     * makes the document grow without bound across handoffs: §1 fills up with
+     * ticked acceptance items, §8 fills up with this session's test runs, and
+     * the successor pays for all of it on every turn. Finished work is already
+     * archived in CHANGELOG.md; repeating it here is duplication, not history.
+     */
+    '3. **已完成的内容一律不写。** 这条最容易被违反：',
+    '   - §1 只写「还没做完的」验收条目。已经打勾的项删掉——它们已完成，继任者不需要再验一遍。',
+    '   - §8 的「已验证」只写**继任者仍然需要依赖**的证据（例如「改了 X 必须跑 Y」）；',
+    '   - 上一段会话跑过的测试、看过的输出，属于过程，写进 CHANGELOG.md 而不是这里。',
+    '   - 判断标准：继任者接手后再读一遍，这条信息还能改变他的动作吗？不能就删。',
+    '4. **不写行号。** 行号第二天就过期。写职责，不写位置。',
+    '5. **不编造验证结果。** 只有你真的执行过、并看到输出的，才能写进 §8 的「已验证」；否则写进「未验证」并给出验证方法。',
+    '6. **不要用「未知」糊弄。** 对话记录里有线索就必须写出具体内容；只有记录里确实没有时，才写「未知」并说明缺什么。',
+    '7. **不写密钥、令牌、密码、连接串的值。** 需要引用时只写键名。',
+    '8. **§0 必须能直接照做。** 写命令和预期输出，不写「建议先检查一下环境」。',
+    '9. **总长控制在约 ' + Math.round(input.budgetChars / 1000) + ' 千字符以内。** 超了会被程序截断，截断发生在你最需要保留的段落上。',
     /*
      * Order of operations, stated as a rule rather than a suggestion.
      *
@@ -407,7 +421,7 @@ export function buildDocPrompt(input: {
      * gets no session at all — far worse than a thin document. One line of
      * prompt removes that whole failure mode.
      */
-    '9. **先写必需小节，再补可选小节。** 必需小节是：' + REQUIRED_HEADINGS.join('、') + '。',
+    '10. **先写必需小节，再补可选小节。** 必需小节是：' + REQUIRED_HEADINGS.join('、') + '。',
     '   若篇幅快用完，**先保证这些小节各有一句可执行的内容**，宁可让可选小节只写「无」。',
     '   任何必需小节为空，整份交接会被拒绝、新会话不会建立——这比写得简短更糟。',
     '',

@@ -211,12 +211,31 @@ export async function previousDocument(
   return readPrevious(files, paths.document, monthOf(now))
 }
 
-/** Resolve the project folder name, honouring a user-pinned override. */
-export function resolveProject(pinned: string, cwd: string | undefined): string {
+/**
+ * Resolve the project folder name.
+ *
+ * Priority: an explicit pin, then the sub-project the session worked in, then
+ * the workspace folder.
+ *
+ * The middle step is the one that matters here. A workspace holding several
+ * repositories has a name that says nothing about the work (`deepseek-harness`
+ * is a container, not a project), so a handoff for a session that only touched
+ * `dsh-handoff-doc` used to land in `docs/handoff/deepseek-harness/` beside every
+ * other project's handoffs. Naming the folder after the focus makes the path
+ * itself answer "which project is this about".
+ */
+export function resolveProject(
+  pinned: string,
+  cwd: string | undefined,
+  focus?: string | undefined,
+): string {
   const trimmed = pinned.trim()
-  if (trimmed.length === 0) return projectSlug(cwd)
-  // A pinned name is still slugified: it becomes a directory name.
-  return projectSlug(`/${trimmed}`)
+  if (trimmed.length > 0) {
+    // A pinned name is still slugified: it becomes a directory name.
+    return projectSlug(`/${trimmed}`)
+  }
+  if (focus !== undefined && focus.trim().length > 0) return projectSlug(`/${focus.trim()}`)
+  return projectSlug(cwd)
 }
 
 /** Facts plus the two program-observed extras the writer needs. */
