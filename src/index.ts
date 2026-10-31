@@ -782,6 +782,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
                     cwd: safely(() => sessionOf(sessionId)?.header?.cwd),
                     sessionId,
                     where: 'handoff',
+                    detail: failureDetail(live, outcome.text),
                     onRecord: (failure) => {
                       lastFailure = failure
                     },
@@ -805,6 +806,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
                 sessionId,
                 where: 'handoff',
                 error,
+                detail: failureDetail(live, errorText(error)),
                 onRecord: (failure) => {
                   lastFailure = failure
                 },
@@ -1099,16 +1101,26 @@ export function errorText(error: unknown): string {
 }
 
 /**
- * Record a failure to disk and append the log path to the visible message.
+ * Record a failure to disk and append the diagnostic block to the message.
  *
- * The conversation surface shows one red line, truncated to a fixed width, so
- * the user reporting a failure can only quote a fragment of it. Writing the
- * full message plus the stack to a file — and naming that file in the message —
- * is the difference between "it failed" and something someone can act on.
+ * ## Why the message becomes multi-line
  *
- * The hint is appended, never substituted: the short message stays first so the
- * common case still reads at a glance. `cwd` is passed in because the session
- * lookup lives inside `apply()`.
+ * The conversation surface renders a command's outcome through
+ * `GenericCommandCard`, and its disclosure only exists when the text contains a
+ * newline: `body = text.includes('\n') ? text : null`. A single-line error gets
+ * no expansion affordance at all — it is clipped to whatever the row can show
+ * and the rest is unreachable. So the short reason stays on the first line
+ * (that is the collapsed summary) and everything else follows after a newline,
+ * where the host's own expand control reveals it in a `<pre>`.
+ *
+ * ## Why the log file still exists
+ *
+ * The expanded `<pre>` is plain text with no copy button and no way to get it
+ * out of the window. The file is what a user can attach to a report, and
+ * `GET /last-error` is what works when the file cannot be written. Three
+ * surfaces for one failure, because each one fails differently.
+ *
+ * `cwd` is passed in because the session lookup lives inside `apply()`.
  */
 async function withLogHint(input: {
   text: string
@@ -1116,6 +1128,8 @@ async function withLogHint(input: {
   sessionId: string
   where: string
   error?: unknown
+  /** Facts worth keeping: budgets, character counts, which sections were missing. */
+  detail?: Readonly<Record<string, unknown>> | undefined
   /** Records the failure for `GET /last-error`, when the plugin is mounted. */
   onRecord?: (failure: HandoffFailure) => void
 }): Promise<string> {
@@ -1127,6 +1141,7 @@ async function withLogHint(input: {
         where: input.where,
         error: input.error ?? new Error(text),
         sessionId: input.sessionId,
+        ...(input.detail === undefined ? {} : { context: input.detail }),
       })
   /*
    * Recorded even when the file could not be written: a read-only workspace
@@ -1137,10 +1152,75 @@ async function withLogHint(input: {
     where: input.where,
     sessionId: input.sessionId,
     message: text,
+    ...(input.detail === undefined ? {} : { detail: input.detail }),
     ...(path === undefined ? {} : { logPath: path }),
   })
-  if (path === undefined) return text
-  return `${text}\n\n完整错误与堆栈已写入：${path}`
+  return `${text}\n${diagnosticBlock({ at, where: input.where, sessionId: input.sessionId, detail: input.detail, logPath: path })}`
+}
+
+/**
+ * The lines after the first one: everything the clipped row cannot show.
+ *
+ * Plain text, not markdown — the host renders this inside `<pre>`, so `**bold**`
+ * would appear literally. Key/value lines read fine there and stay copyable.
+ */
+export function diagnosticBlock(input: {
+  at: number
+  where: string
+  sessionId: string
+  detail: Readonly<Record<string, unknown>> | undefined
+  logPath: string | undefined
+}): string {
+  const lines = ['', '--- 详细信息 ---', `时间：${new Date(input.at).toISOString()}`]
+  lines.push(`阶段：${input.where}`)
+  lines.push(`会话：${input.sessionId}`)
+  for (const [key, value] of Object.entries(input.detail ?? {})) {
+    lines.push(`${key}：${formatValue(value)}`)
+  }
+  lines.push(
+    input.logPath === undefined
+      ? '日志文件：写入失败（工作区不可写），完整堆栈未保存'
+      : `日志文件：${input.logPath}`,
+  )
+  lines.push('完整错误也可用 GET /dsh-handoff-doc/last-error 取回')
+  return lines.join('\n')
+}
+
+function formatValue(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) return value.map((entry) => formatValue(entry)).join('、')
+  if (value === null || value === undefined) return '无'
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value)
+    } catch {
+      return '(无法序列化)'
+    }
+  }
+  return String(value)
+}
+
+/**
+ * The settings that decide whether a handoff can succeed.
+ *
+ * Always included, not only when they look suspicious: the two budgets are what
+ * a reader needs to judge "was this a budget problem", and asking them to go
+ * read the config page to find out turns one failure into two steps.
+ */
+export function failureDetail(settings: { summaryMaxTokens: number; handoffDocMaxChars: number }, text: string): Record<string, unknown> {
+  const detail: Record<string, unknown> = {
+    文档输出上限: `${settings.summaryMaxTokens} tokens`,
+    '交接文档上限（字符）': settings.handoffDocMaxChars,
+  }
+  /*
+   * Pull the numbers back out of the message rather than re-deriving them: the
+   * message is what the user saw, and the block must describe that same run.
+   */
+  const produced = /写到 (\d+) 字符/.exec(text)
+  if (produced !== null) detail['已产出字符'] = Number(produced[1])
+  const missing = /缺：([^）]+)/.exec(text)
+  if (missing !== null) detail['缺少小节'] = missing[1]!.trim()
+  return detail
 }
 
 /** One recorded failure, as returned by `GET /last-error`. */
@@ -1149,6 +1229,7 @@ export interface HandoffFailure {
   readonly where: string
   readonly sessionId: string
   readonly message: string
+  readonly detail?: Readonly<Record<string, unknown>>
   readonly logPath?: string
 }
 
