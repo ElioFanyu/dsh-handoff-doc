@@ -157,6 +157,50 @@ describe('parseDoc', () => {
     expect(parsed.goal).toBe('真正的目标')
     expect(parsed.selfcheck).toBeUndefined()
   })
+
+  /*
+   * The failure that took four wrong diagnoses to find.
+   *
+   * §4's body is a numbered list, and its first item is bold:
+   * `1. **重启 dsh 桌面宿主**（…）`. The old matcher accepted *any* line
+   * starting with `**` as a heading, and also accepted any `N.` whose number
+   * matched a section — so that first item closed §4 immediately. The section
+   * body came back empty, the document was refused for "missing §4", and every
+   * message pointed at the model, the budget, or the reasoning effort instead of
+   * at the parser.
+   */
+  it('does not let a bold numbered list item close the section it is in', () => {
+    const doc = [
+      '## 4. 下一步 + 验证映射',
+      '',
+      '1. **重启 dsh 桌面宿主**（宿主半改动必须重启才生效）。',
+      '2. 在**已工作过的真实会话**里敲 `/handoff`。',
+      '3. 若失败，按这个判据读证据：',
+      '   - `raw.md` 里有 §4 但报缺 → 解析器形状问题',
+      '',
+      '## 5. 硬约束 / 禁忌',
+      '不要写 profile',
+    ].join('\n')
+    const parsed = parseDoc(doc)
+    expect(parsed.next).toContain('重启 dsh 桌面宿主')
+    expect(parsed.next).toContain('解析器形状问题')
+    // §5 must still open on its own heading, not be swallowed by §4.
+    expect(parsed.constraints).toBe('不要写 profile')
+  })
+
+  it('keeps a bolded sentence fragment inside its section', () => {
+    // A long bolded run is prose, not a title; treating it as one would silently
+    // truncate the section it appears in.
+    const parsed = parseDoc(
+      '## 3. 卡点与阻塞\n**这一整句都很长，明显不是一个小节标题，而是正文里的强调**，后面还有话。',
+    )
+    expect(parsed.blockers).toContain('后面还有话')
+  })
+
+  it('still accepts a bold heading with inline body text', () => {
+    const parsed = parseDoc('**1. 目标与验收**：做一个插件')
+    expect(parsed.goal).toBe('做一个插件')
+  })
 })
 
 describe('documentIsUsable', () => {

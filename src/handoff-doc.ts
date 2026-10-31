@@ -502,10 +502,14 @@ export function parseDoc(raw: string): DocNarrative {
   const text = raw.replace(/\r\n/g, '\n')
   const byHeading = new Map<string, DocSectionKey>()
   const byNumber = new Map<string, DocSectionKey>()
+  const knownNumbers = new Set<number>()
   for (const section of DOC_SECTIONS) {
     byHeading.set(normaliseTitle(section.heading.replace(/^#+\s*/, '')), section.key)
     const number = /^(\d+)\./.exec(section.heading.replace(/^#+\s*/, ''))?.[1]
-    if (number !== undefined) byNumber.set(number, section.key)
+    if (number !== undefined) {
+      byNumber.set(number, section.key)
+      knownNumbers.add(Number(number))
+    }
   }
 
   const found = new Map<DocSectionKey, string[]>()
@@ -514,9 +518,18 @@ export function parseDoc(raw: string): DocNarrative {
   for (const line of text.split('\n')) {
     const heading = matchHeading(line)
     if (heading !== undefined) {
-      const key =
-        byHeading.get(normaliseTitle(heading.title)) ??
-        byNumber.get(/^(\d+)\./.exec(heading.title)?.[1] ?? '')
+      /*
+       * A numbered line only opens a section when its text matches a known
+       * title, either exactly or as a shortened form of it.
+       *
+       * §4's body is a numbered list whose items look exactly like section
+       * openers (`1. 重启宿主`, `3. 若失败，按这个判据读证据：`). Matching on
+       * the number alone is what emptied §4 of a real document, so the number
+       * is now only consulted after the title itself failed to match *and* the
+       * line is short enough to be a heading rather than a sentence.
+       */
+      const byTitle = byHeading.get(normaliseTitle(heading.title))
+      const key = byTitle ?? matchShortenedNumbered(heading.title, byNumber, knownNumbers)
       if (key !== undefined) {
         current = key
         if (!found.has(key)) found.set(key, [])
@@ -549,22 +562,102 @@ function normaliseTitle(title: string): string {
     .trim()
 }
 
+/**
+ * Match `3. 卡点与阻塞` when the title was reworded but the number survived.
+ *
+ * Deliberately narrow. A numbered list item and a numbered heading are the same
+ * shape, so this only fires when the line is short enough to be a title (a
+ * sentence is not) *and* its number is one of this document's sections. Without
+ * the length cap, `3. 若失败，按这个判据读证据：` would open a new section and
+ * cut §4 in half — which is exactly the bug this guards.
+ */
+function matchShortenedNumbered(
+  title: string,
+  byNumber: ReadonlyMap<string, DocSectionKey>,
+  knownNumbers: ReadonlySet<number>,
+): DocSectionKey | undefined {
+  const numbered = /^(\d{1,2})\s*[.、)]\s*(\S.*)$/.exec(title)
+  if (numbered === null) return undefined
+  const number = Number(numbered[1])
+  if (!knownNumbers.has(number)) return undefined
+  const rest = numbered[2]!.trim()
+  // A title, not a sentence: section headings here are a few words.
+  if (rest.length > 12) return undefined
+  return byNumber.get(String(number))
+}
+
 /** Recognise `## 标题`, `### **标题**`, and `**标题**：正文`. */
-function matchHeading(line: string): { title: string; remainder: string } | undefined {
-  const trimmed = line.trim()
+/**
+ * Decide whether a line starts a section.
+ *
+ * ## Why this is strict about shape
+ *
+ * Every non-empty line used to be a candidate heading, and any line beginning
+ * with `**` was taken as one. That quietly broke §4 of a real document: its body
+ * opens with a numbered list whose first item is bold —
+ * `1. **重启 dsh 桌面宿主**（…）` — so the first body line was read as a heading
+ * titled with the whole sentence. §4's body became empty, the section counted as
+ * missing, and the handoff was refused with "模型没有写完必需小节（缺：§4）"
+ * while the model had written §4 perfectly.
+ *
+ * That failure is expensive to diagnose because the error points at the model,
+ * the budget, and the reasoning effort — everything except the parser.
+ *
+ * So a heading must look like a heading:
+ *   - `#`-prefixed, or
+ *   - `**Bold**` occupying the whole line (optionally followed by a colon), or
+ *   - `N. Title` / `N、Title` at the start of a line.
+ *
+ * A bold run *inside* a sentence no longer qualifies, and neither does ordinary
+ * prose. Unknown-but-heading-shaped lines are still kept inside the current
+ * section by the caller, so nothing is lost by being conservative here.
+ */
+function matchHeading(
+  line: string,
+  knownNumbers: ReadonlySet<number> = new Set(),
+): { title: string; remainder: string } | undefined {  const trimmed = line.trim()
   if (trimmed.length === 0) return undefined
 
   const hashes = /^#{1,6}\s+(.+)$/.exec(trimmed)
-  const withoutHashes = hashes?.[1] ?? trimmed
-
-  const bold = /^\*\*(.+?)\*\*\s*[:：]?\s*(.*)$/.exec(withoutHashes.trim())
-  if (bold !== null) {
-    const title = bold[1]!.trim()
-    return title.length > 0 ? { title, remainder: (bold[2] ?? '').trim() } : undefined
+  if (hashes !== null) {
+    const title = hashes[1]!.trim()
+    return title.length > 0 ? { title, remainder: '' } : undefined
   }
 
-  const plain = withoutHashes.replace(/[:：]\s*$/, '').replace(/^\*\*|\*\*$/g, '').trim()
-  return plain.length > 0 ? { title: plain, remainder: '' } : undefined
+  /*
+   * `**标题**` must start the line, and what follows it is body text.
+   *
+   * `**1. 目标与验收**：做一个插件` is a heading with its first line inline —
+   * models write this and it is unambiguous. But `1. **重启宿主**（说明）` is a
+   * numbered list item whose emphasis happens to come first, and reading that as
+   * a heading is what emptied §4 of a real document. The distinguishing feature
+   * is the leading number: a heading's own numbering comes *before* the bold run.
+   */
+  const bold = /^\*\*(.+?)\*\*\s*[:：]?\s*(.*)$/.exec(trimmed)
+  if (bold !== null) {
+    const title = bold[1]!.trim()
+    const remainder = (bold[2] ?? '').trim()
+    /*
+     * Length is the discriminator between a title and an emphasised sentence
+     * fragment. Section titles here are a handful of characters; a bolded run
+     * that long is prose, and treating it as a heading would silently close the
+     * section it appears in — which is exactly how §4 disappeared.
+     */
+    if (title.length > 0 && title.length <= 30) return { title, remainder }
+    return undefined
+  }
+
+  /*
+   * `N. 标题` is never accepted on its own.
+   *
+   * §4's body is a numbered list, and its items look exactly like section
+   * openers: `1. 重启宿主`, `3. 若失败，按这个判据读证据：`. No length or shape
+   * test separates those from `3. 卡点与阻塞`, so a numbered line only becomes a
+   * heading when its text also matches a known section title (the caller checks
+   * that). Guessing from the number alone is what shredded §4 of a real
+   * document.
+   */
+  return undefined
 }
 
 /** Which required sections are still empty. */
