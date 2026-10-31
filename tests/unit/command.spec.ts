@@ -1,0 +1,303 @@
+/**
+ * The `/handoff status` report and the `/handoff` command family.
+ *
+ * These are the two things a human actually reads when something goes wrong, and
+ * neither had a test: the command table was covered only through `parseCommandArgs`,
+ * and `renderStatus` was covered nowhere. That left the exact wording in the
+ * acceptance checklist resting on a hand-read of the source, which is precisely
+ * the kind of claim that drifts once someone edits a line.
+ *
+ * The assertions below pin the parts a user acts on — which subcommands exist, the
+ * three verdict labels, and whether a missing context window is admitted or
+ * papered over — without freezing cosmetic whitespace.
+ */
+import { describe, expect, it, vi } from 'vitest'
+import { parseCommandArgs, renderStatus, runCommand } from '@src/command'
+
+const baseStatus = {
+  phase: 'idle',
+  busy: false,
+  latched: false,
+  waitingForStep: false,
+  slowWarning: false,
+  occupancy: { quality: 'exact', used: 70_049, window: 1_000_000, percent: 0.070049 },
+  cumulative: { tokens: 3_504_998, source: 'projection' },
+  thresholds: {
+    handoffPercent: 40,
+    compactPercent: 70,
+    cumulative: 2_000_000,
+    enabled: false,
+    compactEnabled: false,
+  },
+  autoActions: 0,
+  maxAutoActions: 3,
+  warnings: [] as string[],
+  persistence: 'durable' as const,
+}
+
+describe('parseCommandArgs', () => {
+  it('treats a bare command as a handoff', () => {
+    expect(parseCommandArgs(undefined)).toEqual({ kind: 'handoff' })
+    expect(parseCommandArgs('   ')).toEqual({ kind: 'handoff' })
+  })
+
+  it('accepts every subcommand case-insensitively', () => {
+    expect(parseCommandArgs('status').kind).toBe('status')
+    expect(parseCommandArgs('CANCEL').kind).toBe('cancel')
+    expect(parseCommandArgs('Retry').kind).toBe('retry')
+    expect(parseCommandArgs('where').kind).toBe('where')
+  })
+
+  /*
+   * `doc` is an alias because the user-facing concept changed: the handoff is
+   * now a document, and typing the thing you are looking for is the obvious
+   * gesture. Both words must reach the same handler.
+   */
+  it('accepts doc as an alias for where', () => {
+    expect(parseCommandArgs('doc').kind).toBe('where')
+    expect(parseCommandArgs('DOC').kind).toBe('where')
+  })
+
+  /*
+   * Free text is an INSTRUCTION for the successor, not a syntax error.
+   *
+   * This reverses the old behaviour on purpose: `/handoff 推送 GitHub` is the
+   * most natural way to say "continue, and then do this", and refusing it made
+   * the user retype the same sentence in the new session. The text now rides
+   * beside the pointer message.
+   */
+  it('treats unknown words as an instruction for the successor', () => {
+    const parsed = parseCommandArgs('推送 GitHub')
+    expect(parsed.kind).toBe('handoff')
+    if (parsed.kind !== 'handoff') throw new Error('unreachable')
+    expect(parsed.instruction).toBe('推送 GitHub')
+  })
+
+  it('keeps a bare subcommand a subcommand, but not a sentence starting with one', () => {
+    expect(parseCommandArgs('status').kind).toBe('status')
+    // `status` inside a sentence is prose; matching it would swallow the text.
+    const parsed = parseCommandArgs('status 命令修好后推送')
+    expect(parsed.kind).toBe('handoff')
+    if (parsed.kind !== 'handoff') throw new Error('unreachable')
+    expect(parsed.instruction).toBe('status 命令修好后推送')
+  })
+})
+
+describe('renderStatus', () => {
+  it('renders the six stable lines', () => {
+    const text = renderStatus(baseStatus)
+    const lines = text.split('\n')
+
+    expect(lines[0]).toBe('## 会话交接状态')
+    expect(text).toContain('- 阶段：idle')
+    expect(text).toContain('- 上下文占用：70049 / 1000000 tokens · 7% · 精确')
+    expect(text).toContain('- 累计消费：3504998 tokens（日志投影）')
+    expect(text).toContain('- 自动交接阈值：未启用（仅手动）')
+    expect(text).toContain('- 自动压缩阈值：未启用')
+    expect(text).toContain('- 本会话自动动作：0 / 3')
+    expect(lines).toHaveLength(7)
+  })
+
+  it('names the accessor so a disagreement is diagnosable', () => {
+    const fromProjection = renderStatus({
+      ...baseStatus,
+      occupancy: {
+        quality: 'exact',
+        used: 274_086,
+        window: 1_000_000,
+        percent: 0.274086,
+        source: 'contextPressure',
+      },
+    })
+    expect(fromProjection).toContain('27%')
+    expect(fromProjection).toContain('与输入框一致')
+
+    const fallback = renderStatus({
+      ...baseStatus,
+      occupancy: {
+        quality: 'estimated',
+        used: 321_382,
+        window: 1_000_000,
+        percent: 0.321382,
+        source: 'meter-surface',
+      },
+    })
+    expect(fallback).toContain('32%')
+    expect(fallback).toContain('回退：surface 估算')
+  })
+
+  it('admits a missing context window instead of printing 0%', () => {
+    const text = renderStatus({
+      ...baseStatus,
+      occupancy: { quality: 'unavailable', used: 70_049, window: undefined, percent: undefined },
+    })
+
+    expect(text).toContain('未知（模型未上报上下文窗口）')
+    expect(text).toContain('不可用')
+    expect(text).not.toContain('0%')
+    // With no window there is nothing to show after the used count.
+    expect(text).toContain('- 上下文占用：70049 tokens')
+  })
+
+  /*
+   * One sentence covered five different causes, and two of them were wrong.
+   *
+   * Measured on the live host:
+   *   - `session-05402558-…` (a fork from 9-30) is not loaded in this process,
+   *     and `/state` reported `{"quality":"unavailable","used":0}` — the status
+   *     line would have blamed the model for not reporting a window.
+   *   - A loaded session with a known window and an empty surface printed
+   *     "0 / 1000000 tokens · 未知（模型未上报上下文窗口）", denying the window
+   *     it had just displayed.
+   *
+   * Each cause now names itself.
+   */
+  it('blames the missing session, not the model, when the session is not loaded', () => {
+    const text = renderStatus({
+      ...baseStatus,
+      occupancy: { quality: 'unavailable', used: 0, window: undefined, percent: undefined, reason: 'no-session' },
+    })
+
+    expect(text).toContain('该会话未加载到当前进程')
+    expect(text).not.toContain('模型未上报上下文窗口')
+  })
+
+  it('reports an empty surface as empty, without denying the window it prints', () => {
+    const text = renderStatus({
+      ...baseStatus,
+      occupancy: {
+        quality: 'unavailable',
+        used: 0,
+        window: 1_000_000,
+        percent: undefined,
+        reason: 'empty-surface',
+        source: 'contextPressure',
+      },
+    })
+
+    expect(text).toContain('- 上下文占用：0 / 1000000 tokens · 空（当前可见表面为空）')
+    expect(text).not.toContain('模型未上报上下文窗口')
+  })
+
+  it('keeps the model sentence for the one case that really is about the model', () => {
+    const text = renderStatus({
+      ...baseStatus,
+      occupancy: {
+        quality: 'estimated',
+        used: 120_000,
+        window: undefined,
+        percent: undefined,
+        reason: 'no-window',
+        source: 'contextPressure',
+      },
+    })
+
+    expect(text).toContain('未知（模型未上报上下文窗口）')
+  })
+
+  it('distinguishes a deployment without measurement services from a broken measurement', () => {
+    const noSource = renderStatus({
+      ...baseStatus,
+      occupancy: { quality: 'unavailable', used: 0, window: undefined, percent: undefined, reason: 'no-source' },
+    })
+    expect(noSource).toContain('没有 sessionProjections / tokenMeter')
+
+    const failed = renderStatus({
+      ...baseStatus,
+      occupancy: { quality: 'unavailable', used: 0, window: undefined, percent: undefined, reason: 'error' },
+    })
+    expect(failed).toContain('测量失败')
+  })
+
+  it('shows the thresholds once automation is on', () => {
+    const text = renderStatus({
+      ...baseStatus,
+      thresholds: {
+        handoffPercent: 85,
+        compactPercent: 70,
+        cumulative: 2_000_000,
+        enabled: true,
+        compactEnabled: true,
+      },
+    })
+
+    expect(text).toContain('- 自动交接阈值：占用率 85%、累计 2000000 tokens')
+    expect(text).toContain('- 自动压缩阈值：占用率 70%')
+  })
+
+  it('explains a wait, a new session, and the last result together', () => {
+    const text = renderStatus({
+      ...baseStatus,
+      waitingForStep: true,
+      slowWarning: true,
+      newSessionId: 'session-new',
+      lastText: '交接完成。\n附带一行',
+      lastFailure: '上一回超时\n细节',
+    })
+
+    expect(text).toContain('- 正在等待当前 Step 完成…（等待时间偏长）')
+    expect(text).toContain('- 新会话：session-new')
+    // Multi-line verdicts are collapsed so the report stays one line per fact.
+    expect(text).toContain('- 最近结果：交接完成。 · 附带一行')
+    expect(text).toContain('- 最近失败：上一回超时 · 细节')
+  })
+
+  it('marks the latch when one is held', () => {
+    const text = renderStatus({ ...baseStatus, busy: true, latched: true })
+    expect(text).toContain('- 阶段：idle（进行中） · 已设停止闩锁')
+  })
+
+  it('warns when settings are only kept in memory', () => {
+    const text = renderStatus({
+      ...baseStatus,
+      persistence: 'memory',
+      warnings: ['窗口未知'],
+    })
+    expect(text).toContain('- ⚠ 当前部署没有 settings 服务，设置只在本次进程内有效。')
+    expect(text).toContain('- ⚠ 窗口未知')
+  })
+})
+
+describe('runCommand', () => {
+  const deps = {
+    handoff: vi.fn(async () => ({ ok: true, phase: 'completed' as const, text: '交接完成' })),
+    cancel: vi.fn(() => true),
+    status: vi.fn(() => '状态文本'),
+    retry: vi.fn(async () => ({ ok: false, phase: 'failed' as const, text: '重试失败' })),
+    where: vi.fn(async () => '文档路径'),
+  }
+
+  it('routes each subcommand to its dependency', async () => {
+    expect(await runCommand({ kind: 'status' }, 's1', deps)).toEqual({ ok: true, text: '状态文本' })
+    expect(deps.status).toHaveBeenCalledWith('s1')
+
+    expect((await runCommand({ kind: 'handoff' }, 's1', deps)).ok).toBe(true)
+    // No instruction: the third argument stays undefined rather than ''.
+    expect(deps.handoff).toHaveBeenCalledWith('s1', '手动 /handoff', undefined)
+
+    expect((await runCommand({ kind: 'handoff', instruction: '推送 GitHub' }, 's1', deps)).ok).toBe(true)
+    expect(deps.handoff).toHaveBeenLastCalledWith('s1', '手动 /handoff（附指令：推送 GitHub）', '推送 GitHub')
+
+    expect((await runCommand({ kind: 'retry' }, 's1', deps)).ok).toBe(false)
+    expect(deps.retry).toHaveBeenCalledWith('s1')
+
+    expect(await runCommand({ kind: 'where' }, 's1', deps)).toEqual({ ok: true, text: '文档路径' })
+    expect(deps.where).toHaveBeenCalledWith('s1')
+  })
+
+  it('reports a cancel that had nothing to cancel', async () => {
+    const idle = { ...deps, cancel: vi.fn(() => false) }
+    expect(await runCommand({ kind: 'cancel' }, 's1', idle)).toEqual({
+      ok: true,
+      text: '当前没有进行中的动作，无需取消。',
+    })
+  })
+
+  it('runs a handoff carrying free text instead of rejecting it', async () => {
+    const result = await runCommand(parseCommandArgs('bogus'), 's1', deps)
+    // `bogus` used to be a syntax error; it is now an instruction, so the
+    // command still succeeds — the text is not the user's mistake.
+    expect(result.ok).toBe(true)
+    expect(deps.handoff).toHaveBeenCalledWith('s1', '手动 /handoff（附指令：bogus）', 'bogus')
+  })
+})

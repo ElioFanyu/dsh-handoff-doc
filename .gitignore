@@ -1,0 +1,12 @@
+# 依赖
+node_modules/
+
+# tsdown 构建产物（由 npm run build 生成，不入库）
+lib/
+
+# 编辑器 / 系统垃圾
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+*.tsbuildinfo

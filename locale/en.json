@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Session Handoff (Document)",
+    "description": "Hand a long session over as a handoff document (HANDOFF.md) once context usage or spend reaches a threshold: the previous version is archived into CHANGELOG, and the new session receives only a short pointer to the file, with its configuration carried across."
+  }
+}
