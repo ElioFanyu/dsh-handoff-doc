@@ -105,8 +105,10 @@ describe('requestNarrative (llm.stream)', () => {
       model: 'b',
     }).catch((caught: Error) => caught)
     const message = (error as Error).message
-    expect(message).toContain('输出预算不够')
+    // Names the observed finish kind instead of asserting a cause.
+    expect(message).toContain('结束原因 stop')
     expect(message).toContain('文档输出上限')
+    expect(message).toContain('.dsh-handoff-doc.raw.md')
     expect(message).not.toContain('模型没有写完必需小节')
   })
 
@@ -139,8 +141,8 @@ describe('requestNarrative (llm.stream)', () => {
 
     expect(error).toBeInstanceOf(Error)
     const message = (error as Error).message
-    // Names what actually went wrong, and the setting that fixes it.
-    expect(message).toContain('输出预算不够')
+    // Names the observed stream ending, and the setting to change.
+    expect(message).toContain('未收到结束帧')
     expect(message).toContain('文档输出上限')
     expect(message).toContain('4. 下一步')
     expect(message).toContain('/handoff retry')
@@ -160,7 +162,7 @@ describe('requestNarrative (llm.stream)', () => {
     }).catch((caught: Error) => caught)
     const message = (error as Error).message
     expect(message).toContain('没有返回任何内容')
-    expect(message).not.toContain('输出预算不够')
+    expect(message).not.toContain('结束原因')
   })
 
   it('accepts a complete response without complaint', async () => {

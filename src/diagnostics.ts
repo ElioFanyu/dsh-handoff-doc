@@ -23,7 +23,7 @@
  * locked file, a full disk — all of these must cost the log entry and nothing
  * else. Every entry point swallows its own failure.
  */
-import { appendFile, mkdir } from 'node:fs/promises'
+import { appendFile, mkdir, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
 /** One recorded failure, already flattened for a log line. */
@@ -97,5 +97,38 @@ function safeJson(value: unknown): string {
     return JSON.stringify(value)
   } catch {
     return '(无法序列化)'
+  }
+}
+
+/**
+ * Save the model's raw output when a document is refused.
+ *
+ * Written beside the log so the two can be read together. Overwritten each
+ * time — it answers "what did the model just write", not "what did it write
+ * months ago" — and silently skipped on failure, because it is diagnostic.
+ *
+ * This exists because every diagnosis of the missing-§4 failure was an
+ * inference about text nobody could read. The raw output is the one piece of
+ * evidence that distinguishes "§4 was never written" from "§4 was written with
+ * a heading the parser did not recognise".
+ */
+export async function dumpRawOutput(
+  workspace: string,
+  raw: string,
+  stamp: number = Date.now(),
+): Promise<string | undefined> {
+  try {
+    const dir = join(workspace, 'docs/handoff')
+    await mkdir(dir, { recursive: true })
+    const file = join(dir, '.dsh-handoff-doc.raw.md')
+    const header = [
+      `<!-- 生成于 ${new Date(stamp).toISOString()}，共 ${raw.length} 字符 -->`,
+      '<!-- 模型原始输出，未经解析。用来判断缺节是"真的没写"、"标题写错"、还是"解析没认出" -->',
+      '',
+    ].join('\n')
+    await writeFile(file, header + clip(raw, 60_000), 'utf8')
+    return file
+  } catch {
+    return undefined
   }
 }

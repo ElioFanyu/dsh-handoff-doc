@@ -57,7 +57,7 @@ import {
 import { previousDocument, resolveProject, writeHandoff } from './handoff-writer.ts'
 import { focusFromEvents, listSubProjects, readProjectFacts } from './project-facts.ts'
 import { createWorkspaceFiles } from './workspace-fs.ts'
-import { recordFailure } from './diagnostics.ts'
+import { dumpRawOutput, recordFailure } from './diagnostics.ts'
 import { readGitFacts } from './git-facts.ts'
 import {
   deliverBrief,
@@ -329,6 +329,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
       live.summaryMaxTokens,
       route,
       signal,
+      { cwd },
     )
 
     const written = await writeHandoff({
@@ -1247,6 +1248,8 @@ export async function requestNarrative(
   maxTokens: number,
   route: { provider: string; model: string },
   signal?: AbortSignal,
+  /** Where to dump the raw output on refusal; omitted by tests and dry runs. */
+  options?: { cwd?: string | undefined } | undefined,
 ): Promise<DocNarrative> {
   const stream = llm.stream
   if (typeof stream !== 'function') {
@@ -1280,6 +1283,8 @@ export async function requestNarrative(
    * finish reason out lets the caller say what actually happened.
    */
   let truncated = false
+  let finishKind: string | undefined
+  let otherChunks = 0
   for await (const chunk of chunks) {
     if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
       text += chunk.text
@@ -1287,11 +1292,20 @@ export async function requestNarrative(
     }
     if (chunk.type === 'finish') {
       const reason = (chunk as { reason?: { kind?: string; failure?: { message?: string } } }).reason
+      finishKind = reason?.kind
       if (reason?.kind === 'length' || reason?.kind === 'max_tokens') truncated = true
       if (reason?.kind === 'error' || reason?.kind === 'aborted') {
         failure = reason.failure?.message ?? reason.kind
       }
+      continue
     }
+    /*
+     * Anything else is counted, not inspected. The stream may carry reasoning
+     * or usage chunks this plugin does not read; their presence is worth
+     * knowing when a response stops early, since a "high" reasoning effort
+     * spends the same maxTokens budget on thinking as on text.
+     */
+    otherChunks += 1
   }
 
   if (signal?.aborted === true && text.trim().length === 0) {
@@ -1316,40 +1330,42 @@ export async function requestNarrative(
    */
   const narrative = parseDoc(text)
   /*
-   * A truncated response is reported as truncation, with the budget named.
+   * Dump what the model actually produced before judging it.
    *
-   * Throwing here (rather than returning a partial narrative that the caller
-   * then rejects for "missing sections") is what turns a confusing failure into
-   * an actionable one: the user is told the model ran out of output budget and
-   * which setting to raise, not that section 4 could not be found.
+   * Every diagnosis so far has been an inference about a text nobody could
+   * read: "truncated", "adapter sent stop", "budget too small". Guessing again
+   * would be the third wrong answer in a row. The raw output is the one piece
+   * of evidence that settles whether §4 is absent, mis-titled, or present but
+   * unparseable — so it goes to disk, next to the failure record.
    */
+  if (missingRequired(narrative).length > 0 && options?.cwd !== undefined) {
+    await dumpRawOutput(options.cwd, text)
+  }
   const missing = missingRequired(narrative)
   if (missing.length > 0) {
     const names = missing
       .map((key) => DOC_SECTIONS.find((section) => section.key === key)?.heading.replace(/^##\s*/, '') ?? key)
       .join('、')
     /*
-     * Output that stops short of a required section is a budget problem, whether
-     * or not the stream said so.
+     * Report what the stream said, because the answer keeps changing.
      *
-     * Three ways a real truncation has arrived here:
-     *   1. `finish` with `kind === 'length'` — the documented shape;
-     *   2. no `finish` chunk at all — a normal end that ran out of room;
-     *   3. `finish` with `kind === 'stop'` — an adapter reporting the provider's
-     *      natural stop even though its own `maxTokens` cut the text.
-     *
-     * Only case 3 kept the misleading wording, and it is the one that happened:
-     * the message blamed the model for not finishing §4 while the setting was
-     * genuinely too small. Distinguishing them buys nothing — the user's next
-     * action is identical in all three, and the alternative is a message that
-     * sends them hunting for a parser bug that does not exist.
+     * Three different shapes have reached here in three consecutive runs:
+     * `kind: 'length'` (never observed), no finish chunk at all, and
+     * `kind: 'stop'` with output far below budget. The last one means the model
+     * chose to stop — which points at reasoning tokens or a refusal, not at
+     * `summaryMaxTokens`. Rather than guess a fourth time, the message carries
+     * the observed finish kind and the plugin dumps the raw output to disk.
      */
     const produced = text.length
+    const streamed = finishKind === undefined ? '未收到结束帧' : `结束原因 ${finishKind}`
+    const other = otherChunks === 0 ? '' : `，另有 ${otherChunks} 个非文本块`
     if (produced > 0) {
       throw new Error(
         `模型输出在写到 ${produced} 字符时停止，必需小节没写完（缺：${names}）。`
-        + `这通常是输出预算不够：请把设置里的「文档输出上限」从 ${maxTokens} 调大`
-        + `（例如 ${Math.ceil((maxTokens * 1.5) / 1000) * 1000}），或把「交接文档上限（字符）」调小，然后 /handoff retry。`,
+        + `（${streamed}${other}；预算 ${maxTokens} tokens）`
+        + `若结束原因是 length，把「文档输出上限」调大即可；若是 stop，说明模型自己收尾了，`
+        + `通常是推理过程占用了同一份预算，可把「文档输出上限」调大或把「交接文档上限（字符）」调小。`
+        + `已把模型原始输出写到 docs/handoff/.dsh-handoff-doc.raw.md 供核对，然后 /handoff retry。`,
       )
     }
     throw new Error(`模型没有返回任何内容（缺：${names}）。已放弃本次交接，可 /handoff retry。`)
