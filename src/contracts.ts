@@ -217,8 +217,111 @@ export interface TokenMeterLike {
   measure(session: SessionLike, requestHeader?: unknown): TokenMeasurementLike
 }
 
+/**
+ * `ctx.sessionProjections` — the read faces this plugin consumes.
+ *
+ * ## Two faces, and why both are declared
+ *
+ * The registry has offered two different reads, and which one a deployment has
+ * decides both *what shape* comes back and whether the read is still supported:
+ *
+ * - **`snapshot(session, keys)`** — the current face. One consistent cut over
+ *   the client-visible units, with each value already passed through its unit's
+ *   `wire.view()`. This is what the shipped consumers read, and it is
+ *   synchronous and cheap.
+ * - **`stateOf(session, key)`** — the deprecated registry-level read. It returns
+ *   the unit's RAW state, not the wire view, and on 0.2.2 it logs a deprecation
+ *   warning once per key ("read handle.stateOf(session) from an awaited
+ *   registration, or use the owning domain service").
+ *
+ * Reading only the second one — which this plugin did — therefore works but is
+ * on a path the host has explicitly marked for removal, and it obliges the
+ * plugin to re-derive values the host already computes: `contextPressure`'s
+ * `projectedTokens` does not exist in the raw state at all, so it had to be
+ * recomputed from `pressureTokens + surfaceTokens - sampledSurfaceTokens`.
+ *
+ * Both are optional because a composition may publish neither (the metric then
+ * degrades, which every caller reports), and because a test fixture may stub
+ * one. `readProjectionHit` below is the single place that decides which is
+ * used, so no caller has to know.
+ */
+export interface ProjectionSnapshotCutLike {
+  readonly asOfSeq?: number
+  readonly values?: Record<string, unknown>
+}
+
 export interface SessionProjectionsLike {
-  stateOf(session: SessionLike, key: string): unknown
+  /** Current face: a consistent cut of the client-visible wire views. */
+  snapshot?(session: SessionLike, keys?: readonly string[]): ProjectionSnapshotCutLike
+  /**
+   * Deprecated raw-state face, kept for hosts that predate `snapshot`.
+   *
+   * @deprecated Prefer {@link SessionProjectionsLike.snapshot}; reading this
+   * one logs a deprecation warning and needs the caller to re-derive wire
+   * fields the host already knows how to produce.
+   */
+  stateOf?(session: SessionLike, key: string): unknown
+}
+
+/**
+ * One projection unit, read through whichever face the deployment exposes.
+ *
+ * Exactly one of the two is populated: `wire` when `snapshot()` answered for
+ * that key, `raw` when only the deprecated `stateOf()` did. Consumers check
+ * `wire` first because it is the shape the host publishes and the same value
+ * the UI reads, then fall back to `raw`.
+ */
+export interface ProjectionHit {
+  /** The unit's client-visible view, already run through `wire.view()`. */
+  readonly wire: unknown
+  /** The unit's raw state, when only the deprecated face answered. */
+  readonly raw: unknown
+}
+
+/**
+ * Read one projection unit, preferring the current face.
+ *
+ * `stateOf` is consulted **only** when `snapshot` did not answer, so a host that
+ * has `snapshot` never logs the deprecation warning this plugin used to emit on
+ * every status call. A face that throws is treated as "did not answer" rather
+ * than as a failure: measurement runs on the event hot path, and a broken
+ * projection must degrade the trigger, not the session.
+ *
+ * @param projections - the registry, or `undefined` when this deployment has none.
+ * @param session - session whose projections are read.
+ * @param key - projection unit key, e.g. `contextPressure`.
+ * @returns the unit through one face, or `undefined` when neither answered.
+ */
+export function readProjectionHit(
+  projections: SessionProjectionsLike | undefined,
+  session: SessionLike,
+  key: string,
+): ProjectionHit | undefined {
+  if (projections === undefined) return undefined
+
+  if (typeof projections.snapshot === 'function') {
+    try {
+      const cut = projections.snapshot(session, [key])
+      const values = cut?.values
+      if (values !== null && typeof values === 'object' && Object.hasOwn(values, key)) {
+        // A wire view is authoritative: it is what the host itself publishes.
+        return { wire: values[key], raw: undefined }
+      }
+    } catch {
+      // Fall through to the raw face rather than failing the measurement.
+    }
+  }
+
+  if (typeof projections.stateOf === 'function') {
+    try {
+      const state = projections.stateOf(session, key)
+      if (state !== undefined) return { wire: undefined, raw: state }
+    } catch {
+      // Neither face answered; the caller reports "no source".
+    }
+  }
+
+  return undefined
 }
 
 /** `ctx.sessionController` — the only service that may create a session. */

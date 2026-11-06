@@ -11,7 +11,7 @@
  * Neither function throws: measurement happens on the event hot path, and a
  * service that misbehaves must degrade the trigger, not the session.
  */
-import { sessionEvents, type SessionEventLike, type SessionLike } from './contracts.ts'
+import { readProjectionHit, sessionEvents, type SessionEventLike, type SessionLike } from './contracts.ts'
 import type {
   SessionProjectionsLike,
   TokenMeterLike,
@@ -103,42 +103,86 @@ const EMPTY_CONTEXT: ContextOccupancy = {
  * Returns `undefined` when the unit is not registered on this deployment, which
  * is not an error: the meter replay below is the documented fallback.
  *
- * ## Why `projectedTokens` is computed here, not read
+ * ## Two faces, and the shape each one carries
  *
- * `sessionProjections.stateOf()` returns the unit's RAW state, not its wire
- * view: `dsh-session-projection/lib/index.js` `stateOf() { …; return
- * this.cellFor(registration, session).state }`, while the client-visible value
- * is produced by a separate `viewCell()` → `wire.view(state)` path. The raw
- * `contextPressure` state schema is `.strict()` and carries only
- * `contextWindow`, `pressureTokens`, `surfaceTokens`, `sampledSurfaceTokens`,
- * and `claim` — **there is no `projectedTokens` field in it at all**.
+ * The registry exposes the current `snapshot()` face and the deprecated
+ * `stateOf()` face, and they return **different shapes** for this unit — which
+ * is why both are handled here rather than in a caller:
  *
- * An earlier version of this function read `state.projectedTokens`, which is
- * therefore always `undefined` on a real host: the projected reading never
- * applied and every occupancy was reported as `exact` from a stale sample.
- * Its unit test passed because the test helper handed back a hand-built state
- * containing that field — a shape the host never produces.
+ * - `snapshot()` yields the unit's WIRE view (`contextPressureProjectionDefinition
+ *   .wire.view` in `dsh-token-meter`): `{ contextWindow?, pressureTokens?,
+ *   projectedTokens? }`. `projectedTokens` is already computed by the host.
+ * - `stateOf()` yields the RAW state, whose schema is `.strict()` over
+ *   `contextWindow`, `pressureTokens`, `surfaceTokens`, `sampledSurfaceTokens`,
+ *   and `claim`. **There is no `projectedTokens` field in it at all**, so a
+ *   raw-only host requires the derivation below.
  *
- * So the derive happens here, using the host's own wire-view formula
- * (`dsh-token-meter/lib/index.js`, `contextPressureProjectionDefinition.wire`):
+ * Reading the wire view first is both faster and more faithful: it is the exact
+ * value the composer's own meter renders, so the two numbers agree by
+ * construction instead of by a re-implemented formula.
+ *
+ * ## Why the derivation is still kept
+ *
+ * The host's own formula is
  *
  *     projectedTokens = max(0, pressureTokens + surfaceTokens - sampledSurfaceTokens)
  *
- * Matching the formula rather than calling `snapshot()` keeps this plugin off an
- * API the host does not declare for plugins, and keeps the two numbers equal by
- * construction instead of by coincidence.
+ * A host that only has the raw face (an older build, or a fixture) still needs
+ * it, and matching the formula rather than reading a field keeps the two
+ * numbers equal. An earlier version of this function read `state.projectedTokens`,
+ * which is always `undefined` on the raw face: the projected reading never
+ * applied and every occupancy was reported as `exact` from a stale sample.
  */
 function readPressureProjection(
   session: SessionLike,
   projections: SessionProjectionsLike | undefined,
 ): { used: number; baseline: 'usage' | 'estimated'; window?: number } | undefined {
-  if (projections === undefined) return undefined
-  let state: unknown
-  try {
-    state = projections.stateOf(session, 'contextPressure')
-  } catch {
-    return undefined
+  const hit = readProjectionHit(projections, session, 'contextPressure')
+  if (hit === undefined) return undefined
+
+  const num = (value: unknown): number | undefined =>
+    typeof value === 'number' && Number.isFinite(value) ? value : undefined
+
+  /* ---- wire face: the host already projected the sample forward. ---- */
+  if (hit.wire !== null && typeof hit.wire === 'object') {
+    const wire = hit.wire as {
+      pressureTokens?: unknown
+      projectedTokens?: unknown
+      contextWindow?: unknown
+    }
+    const wirePressure = num(wire.pressureTokens)
+    const wireProjected = num(wire.projectedTokens)
+
+    /*
+     * Same precedence as the UI: a reading that can be projected forward wins,
+     * because it answers "how full will the NEXT request be" — which is the
+     * question a handoff threshold is actually asking.
+     *
+     * A wire view with no usable count is **not** second-guessed through the
+     * deprecated face: the host derives the wire view from the same raw state
+     * (`wire.view` spreads `pressureTokens` whenever it exists), so re-reading
+     * raw to recover a field the host chose not to publish would only invent a
+     * number. `undefined` here means "this unit has nothing to say", and the
+     * caller falls back to the meter, which is the documented behaviour.
+     */
+    const wireUsed = wireProjected ?? wirePressure
+    if (wireUsed === undefined || wireUsed <= 0) return undefined
+    const window = num(wire.contextWindow)
+    return {
+      used: wireUsed,
+      /*
+       * `pressureTokens` is a provider-reported prompt size, so using it
+       * alone rests on real usage. `projectedTokens` adds the surface delta
+       * since that sample, which demotes it to an estimate — the same
+       * demotion the UI makes.
+       */
+      baseline: wireProjected === undefined ? 'usage' : 'estimated',
+      ...(window === undefined ? {} : { window }),
+    }
   }
+
+  /* ---- raw face: derive `projectedTokens` with the host's own formula. ---- */
+  const state = hit.raw
   if (state === null || typeof state !== 'object') return undefined
   const record = state as {
     pressureTokens?: unknown
@@ -147,19 +191,14 @@ function readPressureProjection(
     contextWindow?: unknown
   }
 
-  const num = (value: unknown): number | undefined =>
-    typeof value === 'number' && Number.isFinite(value) ? value : undefined
-
   const pressure = num(record.pressureTokens)
   const surface = num(record.surfaceTokens)
   const sampled = num(record.sampledSurfaceTokens)
 
   /*
-   * Same precedence as the UI: a reading that can be projected forward wins,
-   * because it answers "how full will the NEXT request be" — which is the
-   * question a handoff threshold is actually asking. All three inputs are
-   * required: with any of them missing the sample cannot be moved forward, and
-   * silently treating the gap as zero would under-report occupancy.
+   * All three inputs are required: with any of them missing the sample cannot be
+   * moved forward, and silently treating the gap as zero would under-report
+   * occupancy.
    */
   const projected =
     pressure !== undefined && surface !== undefined && sampled !== undefined
@@ -172,11 +211,7 @@ function readPressureProjection(
   const window = num(record.contextWindow)
   return {
     used,
-    /*
-     * `pressureTokens` is a provider-reported prompt size, so the reading rests
-     * on real usage. Adding the surface delta since that sample makes it an
-     * estimate — the same demotion the UI makes.
-     */
+    /* The same demotion as the wire face, for the same reason. */
     baseline: projected === undefined ? 'usage' : 'estimated',
     ...(window === undefined ? {} : { window }),
   }
@@ -317,6 +352,11 @@ export function readContextOccupancy(
  * number is reconstructable after a restart. Falls back to the meter's total,
  * which re-prices the surface heuristically. A failed projection read is
  * *not* fatal: the meter still answers.
+ *
+ * The same unit reports `totals` through both faces — its wire view IS
+ * `state.totals` (`tokenUsageProjectionDefinition.wire.view`) and its raw state
+ * carries the same object under `totals` — so either answer is read the same
+ * way. The wire view is a bare bucket object, the raw state is `{ totals, last }`.
  */
 export function readCumulativeUsage(
   session: SessionLike | undefined,
@@ -329,21 +369,28 @@ export function readCumulativeUsage(
 
   if (projections !== undefined) {
     try {
-      const state = projections.stateOf(session, 'tokenUsage') as
+      const hit = readProjectionHit(projections, session, 'tokenUsage')
+      /*
+       * `wire` is the bucket object itself; `raw` nests it under `totals`.
+       * Normalizing here keeps the caller from having to know which face
+       * answered, which is the whole point of the compatibility layer.
+       */
+      const totals = (
+        hit?.wire !== undefined && hit.wire !== null && typeof hit.wire === 'object'
+          ? hit.wire
+          : (hit?.raw as { totals?: unknown } | undefined)?.totals
+      ) as
         | {
-            totals?: {
-              uncachedInputTokens?: number
-              outputTokens?: number
-              readTokens?: number
-              writeTokens?: number
-              cacheReadTokens?: number
-              cacheWriteTokens?: number
-            }
+            uncachedInputTokens?: number
+            outputTokens?: number
+            readTokens?: number
+            writeTokens?: number
+            cacheReadTokens?: number
+            cacheWriteTokens?: number
           }
         | undefined
 
-      const totals = state?.totals
-      if (totals !== undefined) {
+      if (totals !== undefined && totals !== null) {
         const sum =
           (totals.uncachedInputTokens ?? 0) +
           (totals.outputTokens ?? 0) +

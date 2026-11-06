@@ -98,7 +98,7 @@ DeepSeek Harness 插件：把长会话交接成**一份文件**，而不是一�
 | `contextRearmDeltaPercent` | `10` | 占用率滞回带 |
 | `rearmDeltaTokens` | `200000` | 累计触发后的重臂增量 |
 | `maxAutoActionsPerSession` | `3` | 单会话自动动作上限 |
-| `summaryMaxTokens` | `4096` | 模型单次输出预算 |
+| `summaryMaxTokens` | `26000` | 模型单次输出预算 |
 | `stepWaitTimeoutMs` | `900000` | 等待边界多久算偏久（只提示） |
 | `actionDeadlineMs` | `1800000` | 动作总时限 |
 | `openNewSessionOnHandoff` | `true` | 完成后切到新会话 |
@@ -153,6 +153,30 @@ dsh plugin --profile <profile> add "file:D:/path/to/dsh-handoff-doc"
 ```
 
 安装后重启 dsh。宿主与浏览器半都在同一个包里。
+
+## 版本与宿主兼容性
+
+| 本插件 | 目标 DSH | 说明 |
+| --- | --- | --- |
+| `0.3.0` | `0.2.2-rc.1` | 会话投影改走 `sessionProjections.snapshot()`（当前读口），旧的 `stateOf()` 仅作回退 |
+| `0.2.0` | `0.2.0-rc.2` | 只读 `stateOf()`（原始态），需自行推导 `projectedTokens` |
+
+### 0.2.2 的投影读口变化
+
+DSH 0.2.2 给 `sessionProjections` 提供了两个读口，返回的**形状不同**：
+
+| 读口 | 状态 | `contextPressure` 返回 | `tokenUsage` 返回 | `userQuestions` 返回 |
+| --- | --- | --- | --- | --- |
+| `snapshot(session, keys)` | 当前 | `{ contextWindow?, pressureTokens?, projectedTokens? }` | 桶对象本身 | `{ active, settled }` |
+| `stateOf(session, key)` | **已弃用**，每键告警一次 | 原始态：`{ contextWindow?, pressureTokens?, surfaceTokens, sampledSurfaceTokens?, claim? }` | `{ totals, last }` | 原始态，问题在 `questions` 之下 |
+
+旧版本只读 `stateOf()`，因此必须自己用 `pressureTokens + surfaceTokens - sampledSurfaceTokens` 把 `projectedTokens` 重新算一遍。现在优先读 `snapshot()`：
+
+- 拿到的是宿主已经算好的 wire view，和输入框上方那个百分比**同源**，两个数字不会再有偏差；
+- 有 `snapshot()` 的宿主不会因为本插件触发弃用告警；
+- 只有 `stateOf()` 的旧宿主仍然照旧工作，推导公式原样保留。
+
+两条路径都由 `readProjectionHit()` 统一分派，`tests/unit/projection-compat.spec.ts` 把两个读口的形状差异逐条钉住。
 
 ## 验证情况
 

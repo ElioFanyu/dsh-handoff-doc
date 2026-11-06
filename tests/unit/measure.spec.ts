@@ -26,8 +26,9 @@ function meter(measured: unknown): TokenMeterLike {
 /**
  * A projections registry whose `contextPressure` unit answers one RAW state.
  *
- * The state must have the shape `stateOf()` returns, not the client-visible
- * wire view: `dsh-session-projection/lib/index.js` `stateOf()` returns
+ * This fixture deliberately exposes ONLY the deprecated `stateOf()` face, which
+ * is what an older host has. The state therefore has the shape `stateOf()`
+ * returns, not the client-visible wire view: `stateOf()` returns
  * `cellFor(...).state`, and only `snapshot()`/`viewCell()` run `wire.view()`.
  * The raw `contextPressure` state schema (`dsh-token-meter/lib/index.js`) is
  * `.strict()` over `contextWindow`, `pressureTokens`, `surfaceTokens`,
@@ -37,6 +38,9 @@ function meter(measured: unknown): TokenMeterLike {
  * `projectedTokens`, so every test passed while the production path read an
  * always-undefined field. `pressureState()` exists to make that impossible:
  * it takes the three raw inputs and never a pre-computed projection.
+ *
+ * The CURRENT `snapshot()` face — whose wire view does carry `projectedTokens`
+ * — is covered by `projection-compat.spec.ts`, so both faces stay pinned.
  */
 function pressureState(state: unknown): { stateOf: (s: unknown, key: string) => unknown } {
   return { stateOf: (_s, key) => (key === 'contextPressure' ? state : undefined) }

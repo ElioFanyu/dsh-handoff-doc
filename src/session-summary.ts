@@ -19,6 +19,7 @@
  */
 import { foldUsageFromEvents, percentOf, type ContextOccupancy, type CumulativeUsage } from './measure.ts'
 import {
+  readProjectionHit,
   sessionEvents,
   type SessionEventLike,
   type SessionLike,
@@ -141,21 +142,29 @@ export function readPendingInput(
   return undefined
 }
 
-/** Read the host's unanswered-question list, tolerating any malformation. */
+/**
+ * Read the host's unanswered-question list, tolerating any malformation.
+ *
+ * The `userQuestions` unit reports the same `{ active, settled }` object through
+ * both registry faces — its wire view IS `state.questions`
+ * (`userQuestionProjectionDefinition.wire.view`) and its raw state nests that
+ * object under `questions` — so the compatibility layer's answer is normalized
+ * once here instead of at each face.
+ */
 function readOpenQuestions(
   session: SessionLike | undefined,
   projections: SessionProjectionsLike | undefined,
 ): PendingInput | undefined {
   if (session === undefined || projections === undefined) return undefined
-  let state: unknown
-  try {
-    state = projections.stateOf(session, 'userQuestions')
-  } catch {
-    return undefined
-  }
-  if (state === null || typeof state !== 'object') return undefined
 
-  const questions = (state as { questions?: unknown }).questions
+  const hit = readProjectionHit(projections, session, 'userQuestions')
+  if (hit === undefined) return undefined
+
+  /* `wire` is the questions object itself; `raw` nests it under `questions`. */
+  const questions =
+    hit.wire !== undefined
+      ? hit.wire
+      : (hit.raw as { questions?: unknown } | undefined)?.questions
   if (questions === null || typeof questions !== 'object') return undefined
   const active = (questions as { active?: unknown }).active
   if (!Array.isArray(active) || active.length === 0) return undefined

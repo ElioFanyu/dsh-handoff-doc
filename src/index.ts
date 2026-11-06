@@ -1452,15 +1452,29 @@ export { readGitFacts }
  * ("v1.5.0 / 2026-10-27 最后验证"). The plugin version is the honest answer to
  * "which tooling produced this document" — a reader comparing two handoffs from
  * different plugin versions needs that, and the date alone cannot say it.
+ *
+ * Only `git` is read, so the parameter asks for only that: taking a whole
+ * `DocFacts` made every caller that had just the commit build a full fact set,
+ * and made a unit test assert against a shape the function never touches.
  */
-export function versionOf(facts: DocFacts): string {
+export function versionOf(facts: {
+  readonly git?: { readonly head?: string | undefined } | undefined
+}): string {
   const head = facts.git?.head
   const short = head === undefined ? '' : ` · ${head.slice(0, 8)}`
   return `v${PLUGIN_VERSION}${short}`
 }
 
-/** Bumped when the document skeleton changes, so old files are recognisable. */
-export const PLUGIN_VERSION = '0.2.0'
+/**
+ * The plugin version stamped into every document header.
+ *
+ * Must equal `package.json`'s `version`: this is what `versionOf()` writes into
+ * the `# 交接 —— …（vX.Y.Z / …）` line, and a reader comparing two handoffs needs
+ * it to name the tooling that actually produced them. A stale value here is
+ * invisible in normal use — the document still renders, it just misattributes
+ * itself — so `tests/unit/version.spec.ts` asserts the two stay equal.
+ */
+export const PLUGIN_VERSION = '0.3.0'
 
 /** Map the session-side pending-input fact onto the document's own shape. */
 export function toDocPending(pending: PendingInput): {

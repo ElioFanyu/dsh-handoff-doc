@@ -946,7 +946,9 @@ describe('renderTranscript', () => {
  * detected instead of described. The raw `userQuestions` state shape is copied
  * from `dsh-user-questions/lib/index.js`: the view lives under
  * `state.questions`; each active entry is `{ callId, questions: [{ question, … }], state }`.
- * Asking `stateOf()` for it returns the RAW state — never the wire view.
+ * These fixtures expose only the deprecated `stateOf()` face, so the read
+ * returns that RAW state. The current `snapshot()` face — where the wire view IS
+ * the `questions` object itself — is covered by `projection-compat.spec.ts`.
  */
 describe('readPendingInput — is the outgoing session still waiting?', () => {
   const anySession = { id: 's1' } as never
